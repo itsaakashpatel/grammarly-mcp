@@ -114,11 +114,10 @@ describe("runStagehandGrammarlyTask", () => {
 
 			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, longText);
 
-			// Verify text was truncated to MAX_TEXT_LENGTH (8000) before fill
+			// The full text reaches the editor; nothing is cut off
 			expect(mockPage.locator).toHaveBeenCalledWith('[contenteditable="true"]');
 			expect(mockFill).toHaveBeenCalledTimes(1);
-			expect(mockFill.mock.calls[0][0]).toHaveLength(8000);
-			expect(mockFill.mock.calls[0][0]).toBe("a".repeat(8000));
+			expect(mockFill.mock.calls[0][0]).toHaveLength(10000);
 		});
 
 		it("processes short text correctly", async () => {
@@ -313,38 +312,79 @@ describe("runStagehandGrammarlyTask", () => {
 				expect.anything() // GrammarlyExtractSchema
 			);
 		});
+
+		it("tells the extractor never to estimate a score", async () => {
+			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
+
+			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
+
+			const scoreCall = mockStagehandExtract.mock.calls.find(([instruction]) =>
+				String(instruction).includes("AI Detection Percentage")
+			);
+			expect(scoreCall?.[0]).toContain("Never estimate");
+			expect(scoreCall?.[0]).not.toContain("estimate based");
+		});
+	});
+
+	describe("grammar suggestions", () => {
+		it("returns the suggestions read from the sidebar", async () => {
+			mockStagehandExtract
+				.mockResolvedValueOnce({
+					suggestionCount: 2,
+					suggestions: [
+						{ category: "Correctness", original: "teh", suggestion: "the" },
+						{ category: "Clarity", original: "in order to", suggestion: "to" },
+					],
+				})
+				.mockResolvedValueOnce({
+					aiDetectionPercent: 4,
+					plagiarismPercent: 0,
+					notes: "Scores visible",
+				});
+			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
+
+			const result = await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
+
+			expect(result.grammarSuggestionCount).toBe(2);
+			expect(result.grammarSuggestions).toHaveLength(2);
+			expect(result.grammarSuggestions[0]?.category).toBe("Correctness");
+			expect(result.aiDetectionPercent).toBe(4);
+		});
+
+		it("still returns scores when the suggestions cannot be read", async () => {
+			mockStagehandExtract
+				.mockRejectedValueOnce(new Error("Sidebar not found"))
+				.mockResolvedValueOnce({
+					aiDetectionPercent: 7,
+					plagiarismPercent: 1,
+					notes: "Scores visible",
+				});
+			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
+
+			const result = await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
+
+			expect(result.grammarSuggestionCount).toBeNull();
+			expect(result.grammarSuggestions).toEqual([]);
+			expect(result.aiDetectionPercent).toBe(7);
+		});
 	});
 
 	describe("error handling", () => {
-		it("attempts fallback extraction on primary extraction error", async () => {
+		it("throws when score extraction fails, with no partial extraction", async () => {
 			mockStagehandExtract
+				.mockResolvedValueOnce({ suggestionCount: 0, suggestions: [] })
 				.mockRejectedValueOnce(new Error("Primary extraction failed"))
 				.mockResolvedValueOnce({
 					aiDetectionPercent: 10,
 					plagiarismPercent: 2,
-					notes: "Fallback extraction",
+					notes: "A stale score from an earlier document",
 				});
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(
-				stagehand as unknown as Stagehand,
-				"Test"
-			);
-
-			expect(result.notes).toContain("partial extraction");
-			expect(mockStagehandExtract).toHaveBeenCalledTimes(2);
-		});
-
-		it("throws original error when fallback extraction also fails", async () => {
-			const originalError = new Error("Primary extraction failed");
-			mockStagehandExtract
-				.mockRejectedValueOnce(originalError)
-				.mockRejectedValueOnce(new Error("Fallback also failed"));
 			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
 
 			await expect(
 				runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test")
 			).rejects.toThrow("Primary extraction failed");
+			expect(mockStagehandExtract).toHaveBeenCalledTimes(2);
 		});
 	});
 

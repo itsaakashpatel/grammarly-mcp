@@ -1,8 +1,10 @@
 import type { Stagehand } from "@browserbasehq/stagehand";
 import { log } from "../../config";
-import { GrammarlyExtractSchema } from "./schemas";
-
-const MAX_TEXT_LENGTH = 8000;
+import {
+  GrammarlyExtractSchema,
+  type GrammarlySuggestion,
+  GrammarlySuggestionsExtractSchema,
+} from "./schemas";
 
 export interface GrammarlyTaskOptions {
   maxSteps?: number;
@@ -14,6 +16,8 @@ export interface GrammarlyTaskResult {
   aiDetectionPercent: number | null;
   plagiarismPercent: number | null;
   overallScore?: number | null;
+  grammarSuggestionCount: number | null;
+  grammarSuggestions: GrammarlySuggestion[];
   notes: string;
 }
 
@@ -39,12 +43,8 @@ export async function runStagehandGrammarlyTask(
     throw new Error("No page available in Stagehand context");
   }
 
-  const truncatedText =
-    text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH) : text;
-
   log("debug", "Starting Stagehand Grammarly scoring task", {
     textLength: text.length,
-    truncated: text.length > MAX_TEXT_LENGTH,
     iteration: options?.iteration,
     mode: options?.mode,
   });
@@ -98,19 +98,38 @@ export async function runStagehandGrammarlyTask(
     log("debug", "Typing text into editor");
 
     // For shorter texts, type directly using stagehand
-    if (truncatedText.length <= 500) {
-      await stagehand.act(`Type the following text exactly: ${truncatedText}`);
+    if (text.length <= 500) {
+      await stagehand.act(`Type the following text exactly: ${text}`);
     } else {
       // For longer texts, use Playwright's fill() method which handles contenteditable elements
       // This is more reliable than clipboard API and doesn't require permissions
       log("debug", "Filling long text using Playwright locator.fill()");
       const editorLocator = page.locator('[contenteditable="true"]');
-      await editorLocator.fill(truncatedText);
+      await editorLocator.fill(text);
     }
 
     log("debug", "Text pasted into editor");
-    // Brief delay for Grammarly to process the text
-    await sleep(1000);
+    // Grammarly needs more time to check a long document
+    await sleep(text.length > 2000 ? 6000 : 1500);
+
+    // Step 4b: Read the writing suggestions. A failure here never blocks the scores.
+    let grammarSuggestionCount: number | null = null;
+    let grammarSuggestions: GrammarlySuggestion[] = [];
+    try {
+      const grammar = await stagehand.extract(
+        `Look at the Grammarly suggestions sidebar for the document in the editor.
+        1. Suggestion count: the total number of suggestions Grammarly shows, or null if no count is visible.
+        2. Suggestions: every suggestion card, in order. For each, give the category label
+           (for example Correctness, Clarity, Engagement, Delivery), the flagged words copied exactly,
+           the proposed replacement, and the short explanation if one is visible.
+        Report only what Grammarly shows. Do not invent suggestions.`,
+        GrammarlySuggestionsExtractSchema,
+      );
+      grammarSuggestionCount = grammar.suggestionCount;
+      grammarSuggestions = grammar.suggestions;
+    } catch (error) {
+      log("warn", "Could not read Grammarly suggestions", { error });
+    }
 
     // Step 5: Trigger AI Detection check
     log("debug", "Looking for AI detection button");
@@ -149,10 +168,11 @@ export async function runStagehandGrammarlyTask(
       `Look at the Grammarly interface and extract the following information:
         1. AI Detection Percentage: The percentage showing how much of the text appears to be AI-generated (0-100).
            This might be labeled as "AI-generated", "Likely AI", "AI content detected", etc.
-           If you see text like "probably AI-written" without a number, estimate based on the severity shown.
+           Report only a number that Grammarly shows. If no number is visible, set it to null. Never estimate.
         2. Plagiarism Percentage: The percentage of content that matches existing sources (0-100).
            This might be labeled as "Plagiarism", "Originality", "Similar content found", etc.
            Note: If shown as "originality" (e.g., "95% original"), convert to plagiarism (100 - originality).
+           Report only a number that Grammarly shows. If no number is visible, set it to null. Never estimate.
         3. Overall Score: The overall Grammarly performance score if visible (optional).
         4. Notes: Any relevant observations about what you see, including if features are unavailable.
 
@@ -170,27 +190,16 @@ export async function runStagehandGrammarlyTask(
       aiDetectionPercent: extractResult.aiDetectionPercent,
       plagiarismPercent: extractResult.plagiarismPercent,
       overallScore: extractResult.overallScore,
+      grammarSuggestionCount,
+      grammarSuggestions,
       notes: extractResult.notes,
     };
   } catch (error) {
+    // No partial extraction here: after a failure the page can still show the
+    // scores of an earlier document, and a stale score is worse than none.
+    // The caller retries the whole task.
     log("error", "Stagehand Grammarly task failed", { error });
-
-    // Try to extract whatever we can see
-    try {
-      const fallbackResult = await stagehand.extract(
-        "Extract any visible AI detection or plagiarism scores from the current page. If none are visible, explain what you see.",
-        GrammarlyExtractSchema,
-      );
-
-      return {
-        aiDetectionPercent: fallbackResult.aiDetectionPercent,
-        plagiarismPercent: fallbackResult.plagiarismPercent,
-        overallScore: fallbackResult.overallScore,
-        notes: `Error during task, partial extraction: ${fallbackResult.notes}`,
-      };
-    } catch {
-      throw error;
-    }
+    throw error;
   }
 }
 

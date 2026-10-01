@@ -146,8 +146,8 @@ describe("chooseClaudeModel", () => {
 			expect(chooseClaudeModel(50000, 10, "sonnet")).toBe("sonnet");
 		});
 
-		it("auto mode uses existing heuristics for short text", () => {
-			expect(chooseClaudeModel(100, 1, "auto")).toBe("haiku");
+		it("auto mode picks sonnet for short text, never haiku", () => {
+			expect(chooseClaudeModel(100, 1, "auto")).toBe("sonnet");
 		});
 
 		it("auto mode uses existing heuristics for long text", () => {
@@ -155,14 +155,14 @@ describe("chooseClaudeModel", () => {
 		});
 	});
 
-	describe("selects haiku for", () => {
+	describe("never selects haiku in auto mode", () => {
 		it.each([
 			["short text, few iterations", 2000, 2],
 			["minimum values", 1, 1],
 			["boundary text below 3000", 2999, 3],
 			["short text, single iteration", 1500, 1],
 		])("%s (%d chars, %d iterations)", (_, textLength, iterations) => {
-			expect(chooseClaudeModel(textLength, iterations)).toBe("haiku");
+			expect(chooseClaudeModel(textLength, iterations)).toBe("sonnet");
 		});
 	});
 
@@ -194,8 +194,8 @@ describe("chooseClaudeModel", () => {
 	});
 
 	describe("boundary conditions", () => {
-		it("2999 chars with 3 iterations returns haiku", () => {
-			expect(chooseClaudeModel(2999, 3)).toBe("haiku");
+		it("2999 chars with 3 iterations returns sonnet", () => {
+			expect(chooseClaudeModel(2999, 3)).toBe("sonnet");
 		});
 
 		it("3000 chars returns sonnet (haiku threshold)", () => {

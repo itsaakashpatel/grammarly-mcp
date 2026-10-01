@@ -1,5 +1,6 @@
 import type { AppConfig } from "../config";
 import type { GrammarlyScores } from "./grammarlyTask";
+import type { GrammarlySuggestion } from "./stagehand/schemas";
 
 /**
  * Options for creating a browser session.
@@ -32,6 +33,9 @@ export interface ScoreOptions {
  */
 export interface GrammarlyScoreResult extends GrammarlyScores {
   liveUrl?: string | null;
+  /** Writing suggestions from the Grammarly sidebar (Stagehand provider only). */
+  grammarSuggestionCount?: number | null;
+  grammarSuggestions?: GrammarlySuggestion[];
 }
 
 /**

@@ -13,9 +13,22 @@ import {
   rewriteText,
   summarizeOptimization,
 } from "./llm/rewriteClient";
+import {
+  markdownToPlainText,
+  PLACEHOLDER_INSTRUCTIONS,
+  protectMarkdown,
+  restoreMarkdown,
+  splitFrontMatter,
+} from "./markdown";
 
 export const ToolInputSchema = z.object({
   text: z.string().min(1, "text is required"),
+  content_format: z
+    .enum(["plain", "markdown"])
+    .default("plain")
+    .describe(
+      "markdown: score the prose only, keep front matter, and lock headings, images, tables, code and link targets during rewrites.",
+    ),
   mode: z
     .enum(["score_only", "optimize", "analyze"])
     .default("optimize")
@@ -51,7 +64,7 @@ export const ToolInputSchema = z.object({
     .describe("Short description of the domain (e.g., 'university essay')."),
   custom_instructions: z
     .string()
-    .max(2000)
+    .max(6000)
     .optional()
     .describe(
       "Extra constraints (e.g., preserve citations, do not change code blocks).",
@@ -108,6 +121,24 @@ export const ToolOutputSchema: ZodType<StructuredContent> = z.object({
       }),
     )
     .describe("History of scores and notes for each iteration."),
+  grammar_suggestion_count: z
+    .number()
+    .nullable()
+    .optional()
+    .describe("Total writing suggestions Grammarly shows for the final text."),
+  grammar_suggestions: z
+    .array(
+      z.object({
+        category: z.string(),
+        original: z.string(),
+        suggestion: z.string(),
+        explanation: z.string().optional(),
+      }),
+    )
+    .optional()
+    .describe(
+      "Writing suggestions from the Grammarly sidebar for the final text.",
+    ),
   notes: z.string().describe("Summary or analysis notes from Claude."),
   live_url: z
     .string()
@@ -144,6 +175,8 @@ export interface GrammarlyOptimizeResult {
   iterations_used: number;
   thresholds_met: boolean;
   history: HistoryEntry[];
+  grammar_suggestion_count?: number | null;
+  grammar_suggestions?: GrammarlyScoreResult["grammarSuggestions"];
   notes: string;
   live_url: string | null;
   provider?: string;
@@ -155,33 +188,26 @@ export interface GrammarlyScores {
   plagiarismPercent: number | null;
 }
 
-// Threshold policy: require at least one available score to verify; any
-// unavailable score is treated as passing its respective threshold.
+// Threshold policy: both scores must be available and within their limits.
+// A missing score fails, because an unverified check is not a pass.
 /** @internal Exported for testing */
 export function thresholdsMet(
   scores: GrammarlyScores,
   maxAiPercent: number,
   maxPlagiarismPercent: number,
 ): boolean {
-  const aiAvailable = scores.aiDetectionPercent !== null;
-  const plagiarismAvailable = scores.plagiarismPercent !== null;
-
-  if (!aiAvailable && !plagiarismAvailable) {
-    log("warn", "Cannot verify thresholds: both Grammarly scores unavailable");
+  if (scores.aiDetectionPercent === null || scores.plagiarismPercent === null) {
+    log("warn", "Cannot verify thresholds: a Grammarly score is unavailable", {
+      aiDetectionPercent: scores.aiDetectionPercent,
+      plagiarismPercent: scores.plagiarismPercent,
+    });
     return false;
   }
 
-  // Narrow nullable score fields before comparison to satisfy strict null checks.
-  const aiOk =
-    aiAvailable && scores.aiDetectionPercent !== null
-      ? scores.aiDetectionPercent <= maxAiPercent
-      : true;
-  const plagiarismOk =
-    plagiarismAvailable && scores.plagiarismPercent !== null
-      ? scores.plagiarismPercent <= maxPlagiarismPercent
-      : true;
-
-  return aiOk && plagiarismOk;
+  return (
+    scores.aiDetectionPercent <= maxAiPercent &&
+    scores.plagiarismPercent <= maxPlagiarismPercent
+  );
 }
 
 /**
@@ -241,6 +267,7 @@ export async function runGrammarlyOptimization(
 ): Promise<GrammarlyOptimizeResult> {
   const {
     text,
+    content_format,
     mode,
     max_ai_percent,
     max_plagiarism_percent,
@@ -254,7 +281,23 @@ export async function runGrammarlyOptimization(
 
   const history: HistoryEntry[] = [];
 
-  let currentText = text;
+  // In markdown mode the rewriter works on a placeholder copy of the body,
+  // Grammarly scores the plain prose, and the front matter is never touched.
+  const isMarkdown = content_format === "markdown";
+  const { frontMatter, body } = isMarkdown
+    ? splitFrontMatter(text)
+    : { frontMatter: "", body: text };
+  const rewriteInstructions = isMarkdown
+    ? [custom_instructions, PLACEHOLDER_INSTRUCTIONS]
+        .filter(Boolean)
+        .join("\n\n")
+    : custom_instructions;
+  const toScoringText = (current: string): string =>
+    isMarkdown ? markdownToPlainText(current) : current;
+  const toFinalText = (current: string): string => `${frontMatter}${current}`;
+
+  // currentText is the body the caller will receive (markdown restored).
+  let currentText = body;
   let lastScores: GrammarlyScoreResult | null = null;
   let iterationsUsed = 0;
   let reachedThresholds = false;
@@ -312,7 +355,7 @@ export async function runGrammarlyOptimization(
     // Baseline scoring (iteration 0 before optimization loop) with retry
     lastScores = await withRetry(
       () =>
-        activeProvider.scoreText(activeSessionId, currentText, {
+        activeProvider.scoreText(activeSessionId, toScoringText(currentText), {
           maxSteps: max_steps,
           iteration: 0,
           mode,
@@ -342,12 +385,14 @@ export async function runGrammarlyOptimization(
         : "Score-only run: thresholds not met or scores unavailable; no rewriting performed.";
 
       return {
-        final_text: currentText,
+        final_text: toFinalText(currentText),
         ai_detection_percent: lastScores.aiDetectionPercent,
         plagiarism_percent: lastScores.plagiarismPercent,
         iterations_used: 0,
         thresholds_met: reachedThresholds,
         history,
+        grammar_suggestion_count: lastScores.grammarSuggestionCount ?? null,
+        grammar_suggestions: lastScores.grammarSuggestions ?? [],
         notes,
         live_url: liveUrl,
         provider: activeProvider.providerName,
@@ -377,12 +422,14 @@ export async function runGrammarlyOptimization(
       await onProgress?.("Analysis complete", 100);
 
       return {
-        final_text: currentText,
+        final_text: toFinalText(currentText),
         ai_detection_percent: lastScores.aiDetectionPercent,
         plagiarism_percent: lastScores.plagiarismPercent,
         iterations_used: 0,
         thresholds_met: reachedThresholds,
         history,
+        grammar_suggestion_count: lastScores.grammarSuggestionCount ?? null,
+        grammar_suggestions: lastScores.grammarSuggestions ?? [],
         notes: analysis,
         live_url: liveUrl,
         provider: activeProvider.providerName,
@@ -410,19 +457,38 @@ export async function runGrammarlyOptimization(
         iterationProgress,
       );
 
+      // Protect the latest accepted text, so every token maps to its own value.
+      const locked = isMarkdown ? protectMarkdown(currentText) : null;
       const rewriteResult = await rewriteText(appConfig, {
-        originalText: currentText,
+        originalText: locked ? locked.text : currentText,
         lastAiPercent: lastScores.aiDetectionPercent,
         lastPlagiarismPercent: lastScores.plagiarismPercent,
         targetMaxAiPercent: max_ai_percent,
         targetMaxPlagiarismPercent: max_plagiarism_percent,
         tone,
         domainHint: domain_hint,
-        customInstructions: custom_instructions,
+        customInstructions: rewriteInstructions,
         maxIterations: max_iterations,
       });
 
-      currentText = rewriteResult.rewrittenText;
+      let candidate = rewriteResult.rewrittenText;
+      if (locked) {
+        const restored = restoreMarkdown(candidate, locked.values);
+        if (restored.problems.length > 0) {
+          log("warn", "Rewrite rejected: protected markdown changed", {
+            iteration,
+            problems: restored.problems,
+          });
+          history.push({
+            iteration,
+            ai_detection_percent: lastScores.aiDetectionPercent,
+            plagiarism_percent: lastScores.plagiarismPercent,
+            note: `Rewrite rejected, previous text kept: protected markdown changed (${restored.problems.slice(0, 5).join("; ")}).`,
+          });
+          continue;
+        }
+        candidate = restored.text;
+      }
 
       // Progress: Re-scoring for this iteration.
       const scoringProgress = Math.max(
@@ -437,7 +503,7 @@ export async function runGrammarlyOptimization(
       // Re-score the new candidate with retry logic
       lastScores = await withRetry(
         () =>
-          activeProvider.scoreText(activeSessionId, currentText, {
+          activeProvider.scoreText(activeSessionId, toScoringText(candidate), {
             maxSteps: max_steps,
             iteration,
             mode,
@@ -449,6 +515,8 @@ export async function runGrammarlyOptimization(
           label: `score-iteration-${iteration}`,
         },
       );
+
+      currentText = candidate;
 
       reachedThresholds = thresholdsMet(
         lastScores,
@@ -484,7 +552,7 @@ export async function runGrammarlyOptimization(
       iterationsUsed,
       thresholdsMet: reachedThresholds,
       history,
-      finalText: currentText,
+      finalText: toFinalText(currentText),
       maxAiPercent: max_ai_percent,
       maxPlagiarismPercent: max_plagiarism_percent,
     });
@@ -493,12 +561,14 @@ export async function runGrammarlyOptimization(
     await onProgress?.("Optimization complete", 100);
 
     return {
-      final_text: currentText,
+      final_text: toFinalText(currentText),
       ai_detection_percent: lastScores.aiDetectionPercent,
       plagiarism_percent: lastScores.plagiarismPercent,
       iterations_used: iterationsUsed,
       thresholds_met: reachedThresholds,
       history,
+      grammar_suggestion_count: lastScores.grammarSuggestionCount ?? null,
+      grammar_suggestions: lastScores.grammarSuggestions ?? [],
       notes,
       live_url: liveUrl,
       provider: activeProvider.providerName,

@@ -64,6 +64,7 @@ export interface AppConfig {
   browserbaseProjectId: string | undefined;
   browserbaseSessionId: string | undefined;
   browserbaseContextId: string | undefined;
+  browserbaseAdvancedStealth: boolean;
   stagehandModel: string | undefined;
   stagehandCacheDir: string | undefined;
 
@@ -120,6 +121,9 @@ const EnvSchema = z.object({
   BROWSERBASE_PROJECT_ID: z.string().optional(),
   BROWSERBASE_SESSION_ID: z.string().optional(),
   BROWSERBASE_CONTEXT_ID: z.string().optional(),
+  BROWSERBASE_ADVANCED_STEALTH: z
+    .preprocess((val) => val === "true" || val === true, z.boolean())
+    .default(false),
   STAGEHAND_MODEL: z.string().default("gemini-2.5-flash"),
   STAGEHAND_CACHE_DIR: z.string().optional(),
 
@@ -240,6 +244,7 @@ export const config: AppConfig = {
   browserbaseProjectId: env.BROWSERBASE_PROJECT_ID,
   browserbaseSessionId: env.BROWSERBASE_SESSION_ID,
   browserbaseContextId: env.BROWSERBASE_CONTEXT_ID,
+  browserbaseAdvancedStealth: env.BROWSERBASE_ADVANCED_STEALTH,
   stagehandModel: env.STAGEHAND_MODEL,
   stagehandCacheDir: env.STAGEHAND_CACHE_DIR,
 

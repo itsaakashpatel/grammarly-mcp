@@ -97,6 +97,8 @@ export class StagehandProvider implements BrowserProvider {
     return {
       aiDetectionPercent: result.aiDetectionPercent,
       plagiarismPercent: result.plagiarismPercent,
+      grammarSuggestionCount: result.grammarSuggestionCount,
+      grammarSuggestions: result.grammarSuggestions,
       notes: result.notes,
       liveUrl,
     };

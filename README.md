@@ -1,5 +1,20 @@
 # Grammarly MCP Server
 
+> **Fork notes (`content-gate` branch).** This fork changes the upstream behavior:
+>
+> - The full text is scored. The upstream 8,000-character cut is gone.
+> - Scores are never estimated. A score that Grammarly does not show is `null`, and a `null`
+>   score fails the thresholds.
+> - A failed scoring pass throws and retries. It never reads a possibly stale score.
+> - The output includes `grammar_suggestions` and `grammar_suggestion_count` from the
+>   Grammarly sidebar (best effort, Stagehand only).
+> - `content_format: "markdown"` scores the plain prose, keeps front matter, and locks headings,
+>   images, tables, code, HTML and link targets. A rewrite that changes them is rejected.
+> - `CLAUDE_MODEL=auto` never picks Haiku.
+> - `BROWSERBASE_ADVANCED_STEALTH` (default `false`) controls the Scale plan stealth mode.
+> - `pnpm login:grammarly` saves a Grammarly login into a Browserbase context.
+> - `bin/start.sh` starts the server from the repository root, so a global MCP install finds `.env`.
+
 Single-tool Model Context Protocol (MCP) server for AI detection and plagiarism scoring via Grammarly's web interface. Supports two browser automation providers: **Stagehand + Browserbase** (default) and **Browser Use Cloud** (fallback).
 
 ## What it does

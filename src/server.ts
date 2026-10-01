@@ -64,6 +64,29 @@ export function formatAsMarkdown(result: GrammarlyOptimizeResult): string {
     }
   }
 
+  const suggestions = result.grammar_suggestions ?? [];
+  if (result.grammar_suggestion_count != null || suggestions.length > 0) {
+    lines.push(
+      "",
+      "## Grammar Suggestions",
+      "",
+      `Grammarly count: ${result.grammar_suggestion_count ?? "N/A"}. Listed: ${suggestions.length}.`,
+    );
+    if (suggestions.length > 0) {
+      lines.push(
+        "",
+        "| Category | Original | Suggestion |",
+        "|----------|----------|------------|",
+      );
+      for (const item of suggestions) {
+        const cell = (value: string) => value.replace(/\|/g, "\\|");
+        lines.push(
+          `| ${cell(item.category)} | ${cell(item.original)} | ${cell(item.suggestion)} |`,
+        );
+      }
+    }
+  }
+
   lines.push(
     "",
     "---",

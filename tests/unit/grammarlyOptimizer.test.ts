@@ -137,14 +137,14 @@ describe("thresholdsMet", () => {
 	});
 
 	describe("null scores", () => {
-		it("treats null AI score as passing", () => {
+		it("treats null AI score as failing", () => {
 			const scores: GrammarlyScores = { aiDetectionPercent: null, plagiarismPercent: 2 };
-			expect(thresholdsMet(scores, 10, 5)).toBe(true);
+			expect(thresholdsMet(scores, 10, 5)).toBe(false);
 		});
 
-		it("treats null plagiarism score as passing", () => {
+		it("treats null plagiarism score as failing", () => {
 			const scores: GrammarlyScores = { aiDetectionPercent: 5, plagiarismPercent: null };
-			expect(thresholdsMet(scores, 10, 5)).toBe(true);
+			expect(thresholdsMet(scores, 10, 5)).toBe(false);
 		});
 
 		it("returns false when both scores are null", () => {
@@ -758,7 +758,7 @@ describe("runGrammarlyOptimization", () => {
 			});
 
 			expect(result.ai_detection_percent).toBeNull();
-			expect(result.thresholds_met).toBe(true); // null treated as passing
+			expect(result.thresholds_met).toBe(false); // an unverified score fails
 		});
 
 		it("handles null plagiarism score", async () => {
@@ -774,7 +774,7 @@ describe("runGrammarlyOptimization", () => {
 			});
 
 			expect(result.plagiarism_percent).toBeNull();
-			expect(result.thresholds_met).toBe(true);
+			expect(result.thresholds_met).toBe(false);
 		});
 
 		it("handles both scores null", async () => {
@@ -790,6 +790,122 @@ describe("runGrammarlyOptimization", () => {
 			});
 
 			expect(result.thresholds_met).toBe(false); // Can't verify with no scores
+		});
+	});
+
+	describe("markdown mode", () => {
+		const article = [
+			"---",
+			"title: 'A test article'",
+			"---",
+			"",
+			"Speaking on the phone feels hard. Read the [guide](/learn/phone-calls) first.",
+			"",
+			"## Why calls feel hard",
+			"",
+			"![A phone on a desk.](img:learn/phone/desk-1a2b?1200x896)",
+			"",
+			"Calls take away the face you would read.",
+		].join("\n");
+
+		const markdownInput = {
+			...baseInput,
+			text: article,
+			content_format: "markdown" as const,
+			mode: "optimize" as const,
+			max_iterations: 2,
+		};
+
+		it("scores plain prose without front matter or markup", async () => {
+			mockProviderScoreText.mockResolvedValue({
+				aiDetectionPercent: 2,
+				plagiarismPercent: 0,
+				notes: "ok",
+			});
+
+			await runGrammarlyOptimization(baseConfig, { ...markdownInput, mode: "score_only" });
+
+			const scored = mockProviderScoreText.mock.calls[0]?.[1] as string;
+			expect(scored).not.toContain("title:");
+			expect(scored).not.toContain("##");
+			expect(scored).not.toContain("img:");
+			expect(scored).not.toContain("/learn/phone-calls");
+			expect(scored).toContain("Read the guide first.");
+			expect(scored).toContain("Why calls feel hard");
+		});
+
+		it("sends placeholders to the rewriter and restores them", async () => {
+			mockProviderScoreText
+				.mockResolvedValueOnce({ aiDetectionPercent: 40, plagiarismPercent: 0, notes: "" })
+				.mockResolvedValueOnce({ aiDetectionPercent: 5, plagiarismPercent: 0, notes: "" });
+			mockRewriteText.mockImplementation(async (_config: unknown, { originalText }: { originalText: string }) => ({
+				rewrittenText: originalText.replace("feels hard", "is tough"),
+				reasoning: "Plainer words",
+			}));
+
+			const result = await runGrammarlyOptimization(baseConfig, markdownInput);
+
+			const sent = mockRewriteText.mock.calls[0]?.[1].originalText as string;
+			expect(sent).toContain("⟦KEEP:");
+			expect(sent).toContain("](⟦LINK:");
+			expect(sent).not.toContain("title:");
+			expect(result.final_text.startsWith("---\ntitle: 'A test article'\n---\n")).toBe(true);
+			expect(result.final_text).toContain("Speaking on the phone is tough.");
+			expect(result.final_text).toContain("[guide](/learn/phone-calls)");
+			expect(result.final_text).toContain("## Why calls feel hard");
+			expect(result.final_text).toContain("(img:learn/phone/desk-1a2b?1200x896)");
+			expect(result.thresholds_met).toBe(true);
+		});
+
+		it("rejects a rewrite that drops a placeholder and keeps the previous text", async () => {
+			mockProviderScoreText.mockResolvedValue({ aiDetectionPercent: 40, plagiarismPercent: 0, notes: "" });
+			mockRewriteText.mockResolvedValue({
+				rewrittenText: "A short rewrite that lost every heading and link.",
+				reasoning: "Too aggressive",
+			});
+
+			const result = await runGrammarlyOptimization(baseConfig, markdownInput);
+
+			expect(result.final_text).toBe(article);
+			expect(result.history[1]?.note).toContain("Rewrite rejected");
+			// A rejected rewrite is never sent to Grammarly
+			expect(mockProviderScoreText).toHaveBeenCalledTimes(1);
+		});
+
+		it("passes the custom instructions and the placeholder rules to the rewriter", async () => {
+			mockRewriteText.mockImplementation(async (_config: unknown, { originalText }: { originalText: string }) => ({
+				rewrittenText: originalText,
+				reasoning: "",
+			}));
+
+			await runGrammarlyOptimization(baseConfig, {
+				...markdownInput,
+				max_iterations: 1,
+				custom_instructions: "Never write the word cure.",
+			});
+
+			const instructions = mockRewriteText.mock.calls[0]?.[1].customInstructions as string;
+			expect(instructions).toContain("Never write the word cure.");
+			expect(instructions).toContain("Copy every token exactly once");
+		});
+	});
+
+	describe("grammar suggestions", () => {
+		it("returns the suggestions from the final scoring pass", async () => {
+			mockProviderScoreText.mockResolvedValue({
+				aiDetectionPercent: 3,
+				plagiarismPercent: 0,
+				grammarSuggestionCount: 1,
+				grammarSuggestions: [{ category: "Correctness", original: "teh", suggestion: "the" }],
+				notes: "",
+			});
+
+			const result = await runGrammarlyOptimization(baseConfig, baseInput);
+
+			expect(result.grammar_suggestion_count).toBe(1);
+			expect(result.grammar_suggestions).toEqual([
+				{ category: "Correctness", original: "teh", suggestion: "the" },
+			]);
 		});
 	});
 });

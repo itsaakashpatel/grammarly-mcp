@@ -11,7 +11,7 @@ export const GrammarlyExtractSchema = z.object({
     .max(100)
     .nullable()
     .describe(
-      "AI-generated content percentage (0-100) shown by Grammarly's AI Detector. Set to null if the feature is unavailable or not visible.",
+      "AI-generated content percentage (0-100) exactly as Grammarly's AI Detector shows it. Set to null if no number is visible. Never estimate.",
     ),
   plagiarismPercent: z
     .number()
@@ -19,7 +19,7 @@ export const GrammarlyExtractSchema = z.object({
     .max(100)
     .nullable()
     .describe(
-      "Plagiarism/originality percentage (0-100) from Grammarly's Plagiarism Checker. Set to null if the feature is unavailable or not visible.",
+      "Plagiarism percentage (0-100) exactly as Grammarly's Plagiarism Checker shows it. Set to null if no number is visible. Never estimate.",
     ),
   overallScore: z
     .number()
@@ -37,6 +37,44 @@ export const GrammarlyExtractSchema = z.object({
 });
 
 export type GrammarlyExtractResult = z.infer<typeof GrammarlyExtractSchema>;
+
+/** One writing suggestion from the Grammarly sidebar. */
+export const GrammarlySuggestionSchema = z.object({
+  category: z
+    .string()
+    .describe(
+      "Suggestion category as Grammarly labels it, for example Correctness, Clarity, Engagement or Delivery.",
+    ),
+  original: z
+    .string()
+    .describe("The flagged words in the text, copied exactly."),
+  suggestion: z
+    .string()
+    .describe(
+      "Grammarly's proposed replacement, or an empty string if none is shown.",
+    ),
+  explanation: z
+    .string()
+    .optional()
+    .describe("Grammarly's short reason for the suggestion, if visible."),
+});
+
+export type GrammarlySuggestion = z.infer<typeof GrammarlySuggestionSchema>;
+
+/** Zod schema for extracting the writing suggestions from the Grammarly sidebar. */
+export const GrammarlySuggestionsExtractSchema = z.object({
+  suggestionCount: z
+    .number()
+    .int()
+    .min(0)
+    .nullable()
+    .describe(
+      "Total number of suggestions as Grammarly shows it. Set to null if no count is visible.",
+    ),
+  suggestions: z
+    .array(GrammarlySuggestionSchema)
+    .describe("Every suggestion visible in the sidebar, in the order shown."),
+});
 
 /**
  * Schema for observing UI elements before acting.
