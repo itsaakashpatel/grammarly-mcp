@@ -890,6 +890,56 @@ describe("runGrammarlyOptimization", () => {
 		});
 	});
 
+	describe("optimize loop rules", () => {
+		const optimizeInput = { ...baseInput, mode: "optimize" as const, max_iterations: 3 };
+		const scores = (ai: number | null, plagiarism: number | null) => ({
+			aiDetectionPercent: ai,
+			plagiarismPercent: plagiarism,
+			notes: "",
+		});
+
+		it("returns the best-scoring text, not the last one", async () => {
+			mockProviderScoreText
+				.mockResolvedValueOnce(scores(30, 0))
+				.mockResolvedValueOnce(scores(12, 0))
+				.mockResolvedValueOnce(scores(25, 0))
+				.mockResolvedValueOnce(scores(20, 0));
+			mockRewriteText
+				.mockResolvedValueOnce({ rewrittenText: "Second", reasoning: "r1" })
+				.mockResolvedValueOnce({ rewrittenText: "Third", reasoning: "r2" })
+				.mockResolvedValueOnce({ rewrittenText: "Fourth", reasoning: "r3" });
+
+			const result = await runGrammarlyOptimization(baseConfig, optimizeInput);
+
+			expect(result.final_text).toBe("Second");
+			expect(result.ai_detection_percent).toBe(12);
+			expect(result.history[2]?.note).toContain("Discarded");
+			// Every rewrite starts from the best text so far
+			expect(mockRewriteText.mock.calls[2]?.[1].originalText).toBe("Second");
+		});
+
+		it("stops before any rewrite when a baseline score is missing", async () => {
+			mockProviderScoreText.mockResolvedValue(scores(40, null));
+
+			const result = await runGrammarlyOptimization(baseConfig, optimizeInput);
+
+			expect(mockRewriteText).not.toHaveBeenCalled();
+			expect(result.thresholds_met).toBe(false);
+			expect(result.notes).toContain("no plagiarism score");
+			expect(result.final_text).toBe(baseInput.text);
+		});
+
+		it("does not rewrite text that already passes", async () => {
+			mockProviderScoreText.mockResolvedValue(scores(2, 0));
+
+			const result = await runGrammarlyOptimization(baseConfig, optimizeInput);
+
+			expect(mockRewriteText).not.toHaveBeenCalled();
+			expect(result.thresholds_met).toBe(true);
+			expect(result.iterations_used).toBe(0);
+		});
+	});
+
 	describe("grammar suggestions", () => {
 		it("returns the suggestions from the final scoring pass", async () => {
 			mockProviderScoreText.mockResolvedValue({

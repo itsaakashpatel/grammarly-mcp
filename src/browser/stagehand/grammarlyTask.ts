@@ -28,6 +28,11 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Collapses whitespace, so line breaks in the editor do not break the comparison. */
+function normalize(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Run Grammarly scoring task using Stagehand's deterministic automation.
  * Uses the observe()->act()->extract() pattern for reliable, fast execution.
@@ -106,6 +111,24 @@ export async function runStagehandGrammarlyTask(
       log("debug", "Filling long text using Playwright locator.fill()");
       const editorLocator = page.locator('[contenteditable="true"]');
       await editorLocator.fill(text);
+    }
+
+    // A silent failure of "New document" would leave the old document and its
+    // old scores on screen, so confirm the editor holds the start of this text.
+    const expectedStart = normalize(text).slice(0, 60);
+    const editorText = normalize(
+      String(
+        (await page.evaluate(
+          () =>
+            document.querySelector('[contenteditable="true"]')?.textContent ??
+            "",
+        )) ?? "",
+      ),
+    );
+    if (!editorText.includes(expectedStart)) {
+      throw new Error(
+        "Grammarly editor does not contain the new text; refusing to read scores",
+      );
     }
 
     log("debug", "Text pasted into editor");

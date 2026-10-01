@@ -39,12 +39,18 @@ function isLoggedInUrl(url: string): boolean {
 function saveContextId(contextId: string): void {
   const envPath = path.resolve(process.cwd(), ".env");
   const current = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf-8") : "";
-  if (/^BROWSERBASE_CONTEXT_ID=/m.test(current)) {
+  if (/^BROWSERBASE_CONTEXT_ID=\S/m.test(current)) {
     console.log("BROWSERBASE_CONTEXT_ID is already in .env; it was not changed.");
     return;
   }
-  const separator = current === "" || current.endsWith("\n") ? "" : "\n";
-  fs.appendFileSync(envPath, `${separator}BROWSERBASE_CONTEXT_ID=${contextId}\n`);
+  // Replace an empty BROWSERBASE_CONTEXT_ID= line, or append a new one.
+  const line = `BROWSERBASE_CONTEXT_ID=${contextId}`;
+  if (/^BROWSERBASE_CONTEXT_ID=\s*$/m.test(current)) {
+    fs.writeFileSync(envPath, current.replace(/^BROWSERBASE_CONTEXT_ID=\s*$/m, line));
+  } else {
+    const separator = current === "" || current.endsWith("\n") ? "" : "\n";
+    fs.appendFileSync(envPath, `${separator}${line}\n`);
+  }
   console.log("Wrote BROWSERBASE_CONTEXT_ID to .env.");
 }
 
@@ -56,7 +62,7 @@ async function main(): Promise<void> {
 
   const bb = new Browserbase({ apiKey });
   const contextId =
-    config.browserbaseContextId ?? (await bb.contexts.create({ projectId })).id;
+    config.browserbaseContextId || (await bb.contexts.create({ projectId })).id;
   console.log(`CONTEXT_ID ${contextId}`);
 
   const session = await bb.sessions.create({

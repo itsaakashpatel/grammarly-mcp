@@ -27,6 +27,15 @@ const mockStagehandExtract = vi.fn();
 // Mock for waitForLoadState
 const mockWaitForLoadState = vi.fn();
 
+// What the Grammarly editor holds. fill() and the "Type" act write it; the
+// task reads it back through page.evaluate() to confirm the new text arrived.
+let editorContent = "";
+const TYPE_PREFIX = "Type the following text exactly: ";
+const fillEditor = () =>
+	vi.fn(async (value: string) => {
+		editorContent = value;
+	});
+
 // Create mock page factory
 function createMockPage(url = "https://other-site.com") {
 	return {
@@ -35,7 +44,7 @@ function createMockPage(url = "https://other-site.com") {
 		evaluate: mockPageEvaluate,
 		waitForLoadState: mockWaitForLoadState.mockResolvedValue(undefined),
 		locator: vi.fn().mockReturnValue({
-			fill: vi.fn().mockResolvedValue(undefined),
+			fill: fillEditor(),
 		}),
 	};
 }
@@ -65,16 +74,26 @@ describe("runStagehandGrammarlyTask", () => {
 
 		// Default successful mocks
 		mockPageGoto.mockResolvedValue(undefined);
-		mockPageEvaluate.mockResolvedValue(undefined);
+		editorContent = "";
+		mockPageEvaluate.mockImplementation(async () => editorContent);
 		mockWaitForLoadState.mockResolvedValue(undefined);
 		mockStagehandObserve.mockResolvedValue([{ description: "New document button" }]);
-		mockStagehandAct.mockResolvedValue(undefined);
-		mockStagehandExtract.mockResolvedValue({
-			aiDetectionPercent: 15,
-			plagiarismPercent: 3,
-			overallScore: 85,
-			notes: "Scores extracted successfully",
+		mockStagehandAct.mockImplementation(async (instruction: unknown) => {
+			if (typeof instruction === "string" && instruction.startsWith(TYPE_PREFIX)) {
+				editorContent = instruction.slice(TYPE_PREFIX.length);
+			}
 		});
+		// Route each extract call by its instruction, as the real extractor sees it.
+		mockStagehandExtract.mockImplementation(async (instruction: string) =>
+			instruction.includes("suggestions sidebar")
+				? { suggestionCount: 1, suggestions: [{ category: "Correctness", original: "teh", suggestion: "the" }] }
+				: {
+						aiDetectionPercent: 15,
+						plagiarismPercent: 3,
+						overallScore: 85,
+						notes: "Scores extracted successfully",
+					}
+		);
 	});
 
 	afterEach(() => {
@@ -103,7 +122,7 @@ describe("runStagehandGrammarlyTask", () => {
 	describe("text handling", () => {
 		it("processes text longer than 8000 characters", async () => {
 			const longText = "a".repeat(10000);
-			const mockFill = vi.fn().mockResolvedValue(undefined);
+			const mockFill = fillEditor();
 			const mockPage = {
 				...createMockPage("https://app.grammarly.com"),
 				locator: vi.fn().mockReturnValue({
@@ -213,7 +232,7 @@ describe("runStagehandGrammarlyTask", () => {
 
 		it("uses locator.fill() for long text (>500 chars)", async () => {
 			const longText = "a".repeat(1200); // Long text triggers fill() approach
-			const mockFill = vi.fn().mockResolvedValue(undefined);
+			const mockFill = fillEditor();
 			const mockPage = {
 				...createMockPage("https://app.grammarly.com"),
 				locator: vi.fn().mockReturnValue({
@@ -276,7 +295,7 @@ describe("runStagehandGrammarlyTask", () => {
 				"Test"
 			);
 
-			expect(result).toEqual({
+			expect(result).toMatchObject({
 				aiDetectionPercent: 25,
 				plagiarismPercent: 8,
 				overallScore: 90,
@@ -326,7 +345,44 @@ describe("runStagehandGrammarlyTask", () => {
 		});
 	});
 
+	describe("editor check", () => {
+		it("refuses to read scores when the editor does not hold the new text", async () => {
+			mockPageEvaluate.mockImplementation(async () => "The text of an older document.");
+			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
+
+			await expect(
+				runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Brand new text")
+			).rejects.toThrow("does not contain the new text");
+			const scoreCalls = mockStagehandExtract.mock.calls.filter(([instruction]) =>
+				String(instruction).includes("AI Detection Percentage")
+			);
+			expect(scoreCalls).toHaveLength(0);
+		});
+
+		it("accepts editor text with different line breaks", async () => {
+			mockPageEvaluate.mockImplementation(async () => "First line\n\nsecond   line");
+			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
+
+			const result = await runStagehandGrammarlyTask(
+				stagehand as unknown as Stagehand,
+				"First line second line"
+			);
+			expect(result.aiDetectionPercent).toBe(15);
+		});
+	});
+
 	describe("grammar suggestions", () => {
+		it("flows the default sidebar suggestions through", async () => {
+			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
+
+			const result = await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
+
+			expect(result.grammarSuggestionCount).toBe(1);
+			expect(result.grammarSuggestions).toEqual([
+				{ category: "Correctness", original: "teh", suggestion: "the" },
+			]);
+		});
+
 		it("returns the suggestions read from the sidebar", async () => {
 			mockStagehandExtract
 				.mockResolvedValueOnce({
