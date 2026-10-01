@@ -1,13 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Mock the config module for logging
 vi.mock("../../../../src/config", () => ({
 	log: vi.fn(),
 }));
 
-// Mock the setTimeout to prevent actual delays
-// Using fake timers with sleep() requires advancing timers in each test
-// Instead, immediately invoke callbacks for test speed without test modifications
+// Run every sleep at once, so the polling loops finish immediately.
 vi.stubGlobal(
 	"setTimeout",
 	vi.fn((cb: () => void) => {
@@ -16,526 +13,288 @@ vi.stubGlobal(
 	})
 );
 
-// Mock functions at top level
-const mockPageUrl = vi.fn();
-const mockPageGoto = vi.fn();
-const mockPageEvaluate = vi.fn();
-const mockStagehandObserve = vi.fn();
-const mockStagehandAct = vi.fn();
-const mockStagehandExtract = vi.fn();
-
-// Mock for waitForLoadState
-const mockWaitForLoadState = vi.fn();
-
-// What the Grammarly editor holds. fill() and the "Type" act write it; the
-// task reads it back through page.evaluate() to confirm the new text arrived.
-let editorContent = "";
-const TYPE_PREFIX = "Type the following text exactly: ";
-const fillEditor = () =>
-	vi.fn(async (value: string) => {
-		editorContent = value;
-	});
-
-// Create mock page factory
-function createMockPage(url = "https://other-site.com") {
-	return {
-		url: mockPageUrl.mockReturnValue(url),
-		goto: mockPageGoto,
-		evaluate: mockPageEvaluate,
-		waitForLoadState: mockWaitForLoadState.mockResolvedValue(undefined),
-		locator: vi.fn().mockReturnValue({
-			fill: fillEditor(),
-		}),
-	};
-}
-
-// Create mock Stagehand factory
-function createMockStagehand(pages: unknown[] = [createMockPage()]) {
-	return {
-		context: {
-			pages: vi.fn().mockReturnValue(pages),
-		},
-		observe: mockStagehandObserve,
-		act: mockStagehandAct,
-		extract: mockStagehandExtract,
-	};
-}
-
-// Import after mocking (the module uses named imports)
 import type { Stagehand } from "@browserbasehq/stagehand";
 import {
 	cleanupGrammarlyDocument,
+	countWords,
+	parseScores,
+	parseSuggestionCount,
+	parseWordCount,
 	runStagehandGrammarlyTask,
 } from "../../../../src/browser/stagehand/grammarlyTask";
 
-describe("runStagehandGrammarlyTask", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
+// Panel text copied from a real Grammarly session (September 2026).
+const SUGGESTIONS_PANEL =
+	"Review suggestions\nCheck for AI\ntext & plagiarism\nGrammarly Assistant\nReview suggestions\n16\nCorrectness\nClarity\nEngagement\nDelivery\nStyle guide\nCorrectness · Correct the verb\nIt was released in 2021 and…\nAccept";
+const CHECKING_PANEL =
+	"Review suggestions\nCheck for AI\ntext & plagiarism\nGrammarly Assistant\nChecking for plagiarism and AI text...\nWe’re comparing your document to billions of web pages and academic papers, and detecting patterns often used by AI.";
+const RESULT_PANEL =
+	"Review suggestions\nCheck for AI\ntext & plagiarism\nGrammarly Assistant\nPlagiarism and AI text check\nAPA\nThis section resembles AI text\nWe didn’t detect plagiarism\nYour document doesn’t match anything in our references\n37% of your text has patterns that resemble AI text\nThese patterns may show AI text or occur in your writing";
+const EMPTY_DOC_PANEL =
+	"Review suggestions\nCheck for AI\ntext & plagiarism\nGrammarly Assistant\nNo plagiarism or AI text detected\nYour document doesn’t match anything in our references or contain common AI text patterns.";
 
-		// Default successful mocks
-		mockPageGoto.mockResolvedValue(undefined);
-		editorContent = "";
-		mockPageEvaluate.mockImplementation(async () => editorContent);
-		mockWaitForLoadState.mockResolvedValue(undefined);
-		mockStagehandObserve.mockResolvedValue([{ description: "New document button" }]);
-		mockStagehandAct.mockImplementation(async (instruction: unknown) => {
-			if (typeof instruction === "string" && instruction.startsWith(TYPE_PREFIX)) {
-				editorContent = instruction.slice(TYPE_PREFIX.length);
-			}
-		});
-		// Route each extract call by its instruction, as the real extractor sees it.
-		mockStagehandExtract.mockImplementation(async (instruction: string) =>
-			instruction.includes("suggestions sidebar")
-				? { suggestionCount: 1, suggestions: [{ category: "Correctness", original: "teh", suggestion: "the" }] }
-				: {
-						aiDetectionPercent: 15,
-						plagiarismPercent: 3,
-						overallScore: 85,
-						notes: "Scores extracted successfully",
-					}
-		);
+interface FakeGrammarly {
+	editorText: string;
+	aiTabOpen: boolean;
+	checkPolls: number;
+	/** Words Grammarly reports; defaults to the real count of the editor text. */
+	wordCountOverride?: number;
+	/** When false, the paste event is dispatched but Grammarly ignores it. */
+	pasteRegisters: boolean;
+	resultPanel: string;
+	checkingPollsBeforeResult: number;
+}
+
+let fake: FakeGrammarly;
+
+function pageText(): string {
+	const words = fake.wordCountOverride ?? countWords(fake.editorText);
+	let panel = SUGGESTIONS_PANEL;
+	if (fake.aiTabOpen) {
+		fake.checkPolls += 1;
+		panel = fake.checkPolls <= fake.checkingPollsBeforeResult ? CHECKING_PANEL : fake.resultPanel;
+	}
+	// The real page puts the document before the counter and the panels.
+	return `${fake.editorText}Saved\nGoals\n--\nOverall score\n${words} words\n${panel}`;
+}
+
+const mockEvaluate = vi.fn(async (_fn: unknown, arg?: unknown) => {
+	if (arg && typeof arg === "object" && "value" in arg) {
+		if (fake.pasteRegisters) {
+			fake.editorText = (arg as { value: string }).value;
+		}
+		return true;
+	}
+	return { pageText: pageText(), editorText: fake.editorText };
+});
+
+const mockObserve = vi.fn();
+const mockAct = vi.fn();
+const mockExtract = vi.fn();
+const mockGoto = vi.fn();
+
+function createStagehand(url = "https://app.grammarly.com") {
+	const page = {
+		url: vi.fn().mockReturnValue(url),
+		goto: mockGoto,
+		evaluate: mockEvaluate,
+		waitForLoadState: vi.fn().mockResolvedValue(undefined),
+	};
+	return {
+		context: { pages: vi.fn().mockReturnValue([page]) },
+		observe: mockObserve,
+		act: mockAct,
+		extract: mockExtract,
+	} as unknown as Stagehand;
+}
+
+const ARTICLE = "Speaking on the phone feels hard.\n\nCalls take away the face you would read. ".repeat(20);
+
+beforeEach(() => {
+	vi.clearAllMocks();
+	fake = {
+		editorText: "",
+		aiTabOpen: false,
+		checkPolls: 0,
+		pasteRegisters: true,
+		resultPanel: RESULT_PANEL,
+		checkingPollsBeforeResult: 2,
+	};
+	mockGoto.mockResolvedValue(undefined);
+	mockObserve.mockImplementation(async (instruction: string) =>
+		/AI text and plagiarism/i.test(instruction)
+			? [{ description: "Tab to check for AI text & plagiarism" }]
+			: [{ description: "New document button" }]
+	);
+	mockAct.mockImplementation(async (action: unknown) => {
+		const label = typeof action === "string" ? action : (action as { description: string }).description;
+		if (/AI text/i.test(label)) {
+			fake.aiTabOpen = true;
+		}
+	});
+	mockExtract.mockImplementation(async (instruction: string) =>
+		instruction.includes("suggestions sidebar")
+			? {
+					suggestionCount: 16,
+					suggestions: [{ category: "Correctness", original: "released", suggestion: "was released" }],
+				}
+			: { aiDetectionPercent: 99, plagiarismPercent: 99, notes: "LLM reader" }
+	);
+});
+
+describe("parsers", () => {
+	it("counts words like Grammarly", () => {
+		expect(countWords("  One two\n\nthree  ")).toBe(3);
+		expect(countWords("   ")).toBe(0);
 	});
 
-	afterEach(() => {
-		vi.resetAllMocks();
+	it("reads the word counter", () => {
+		expect(parseWordCount("Overall score\n684 words\n")).toBe(684);
+		expect(parseWordCount("Overall score\n1,204 words")).toBe(1204);
+		expect(parseWordCount("Overall score\n--")).toBeNull();
 	});
 
-	describe("page retrieval", () => {
-		it("throws error when no page available in context", async () => {
-			const stagehand = createMockStagehand([]);
-
-			await expect(
-				runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test text")
-			).rejects.toThrow("No page available in Stagehand context");
-		});
-
-		it("uses first page from context", async () => {
-			const mockPage = createMockPage("https://app.grammarly.com/docs/123");
-			const stagehand = createMockStagehand([mockPage]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test text");
-
-			expect(mockPageUrl).toHaveBeenCalled();
-		});
+	it("reads the suggestion total", () => {
+		expect(parseSuggestionCount(SUGGESTIONS_PANEL)).toBe(16);
+		expect(parseSuggestionCount(RESULT_PANEL)).toBeNull();
 	});
 
-	describe("text handling", () => {
-		it("processes text longer than 8000 characters", async () => {
-			const longText = "a".repeat(10000);
-			const mockFill = fillEditor();
-			const mockPage = {
-				...createMockPage("https://app.grammarly.com"),
-				locator: vi.fn().mockReturnValue({
-					fill: mockFill,
-				}),
-			};
-			const stagehand = createMockStagehand([mockPage]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, longText);
-
-			// The full text reaches the editor; nothing is cut off
-			expect(mockPage.locator).toHaveBeenCalledWith('[contenteditable="true"]');
-			expect(mockFill).toHaveBeenCalledTimes(1);
-			expect(mockFill.mock.calls[0][0]).toHaveLength(10000);
-		});
-
-		it("processes short text correctly", async () => {
-			const shortText = "Short test text";
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, shortText);
-
-			// Verify the exact text is used for short texts (<=500 chars get typed directly)
-			const actCalls = mockStagehandAct.mock.calls;
-			const typeCall = actCalls.find(
-				(call) => typeof call[0] === "string" && call[0].includes(shortText)
-			);
-			expect(typeCall).toBeDefined();
-		});
-	});
-
-	describe("navigation", () => {
-		it("navigates to Grammarly when not already there", async () => {
-			const mockPage = createMockPage("https://other-site.com");
-			const stagehand = createMockStagehand([mockPage]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(mockPageGoto).toHaveBeenCalledWith("https://app.grammarly.com", {
-				waitUntil: "networkidle",
-			});
-		});
-
-		it("skips navigation when already on Grammarly", async () => {
-			const mockPage = createMockPage("https://app.grammarly.com/docs/123");
-			const stagehand = createMockStagehand([mockPage]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(mockPageGoto).not.toHaveBeenCalled();
-		});
-	});
-
-	describe("observe-then-act pattern", () => {
-		it("uses observed element when observation returns results", async () => {
-			const observedElement = { description: "New document", selector: "#new-doc" };
-			mockStagehandObserve.mockResolvedValue([observedElement]);
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			// Should call act with the observed element
-			expect(mockStagehandAct).toHaveBeenCalledWith(observedElement);
-		});
-
-		it("falls back to direct action when observation returns empty array", async () => {
-			mockStagehandObserve.mockResolvedValue([]);
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			// Should call act with a string instruction as fallback
-			expect(mockStagehandAct).toHaveBeenCalledWith(
-				expect.stringContaining("Click on 'New'")
-			);
-		});
-
-		it("falls back to direct action when first element is undefined", async () => {
-			mockStagehandObserve.mockResolvedValue([undefined]);
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			// Should call act with a string instruction as fallback
-			expect(mockStagehandAct).toHaveBeenCalledWith(
-				expect.stringContaining("Click on 'New'")
-			);
+	it("reads the real result panel", () => {
+		expect(parseScores(RESULT_PANEL)).toEqual({
+			aiDetectionPercent: 37,
+			plagiarismPercent: 0,
+			checking: false,
 		});
 	});
 
-	describe("text input", () => {
-		it("types short text directly (<=500 chars)", async () => {
-			const shortText = "Short text under 500 characters";
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, shortText);
-
-			// Find the act call that types the text directly
-			const actCalls = mockStagehandAct.mock.calls;
-			const directTypeCall = actCalls.find(
-				(call) =>
-					typeof call[0] === "string" &&
-					call[0].includes("Type the following text exactly:")
-			);
-			expect(directTypeCall).toBeDefined();
-		});
-
-		it("uses locator.fill() for long text (>500 chars)", async () => {
-			const longText = "a".repeat(1200); // Long text triggers fill() approach
-			const mockFill = fillEditor();
-			const mockPage = {
-				...createMockPage("https://app.grammarly.com"),
-				locator: vi.fn().mockReturnValue({
-					fill: mockFill,
-				}),
-			};
-			const stagehand = createMockStagehand([mockPage]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, longText);
-
-			// Check that locator.fill() was called for long text
-			expect(mockPage.locator).toHaveBeenCalledWith('[contenteditable="true"]');
-			expect(mockFill).toHaveBeenCalledTimes(1);
-			expect(mockFill.mock.calls[0][0]).toBe(longText);
-		});
-
-	});
-
-	describe("AI detection observation", () => {
-		it("uses observed AI detection element when found", async () => {
-			const aiDetectElement = { description: "AI Detection button" };
-			mockStagehandObserve
-				.mockResolvedValueOnce([{ description: "New document" }]) // First observe
-				.mockResolvedValueOnce([aiDetectElement]); // Second observe for AI detection
-
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(mockStagehandAct).toHaveBeenCalledWith(aiDetectElement);
-		});
-
-		it("falls back to direct action for AI detection when not observed", async () => {
-			mockStagehandObserve
-				.mockResolvedValueOnce([{ description: "New document" }])
-				.mockResolvedValueOnce([]); // Empty AI detection observation
-
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(mockStagehandAct).toHaveBeenCalledWith(
-				expect.stringContaining("Open the AI detection panel")
-			);
+	it("reports the checking state with no scores", () => {
+		expect(parseScores(CHECKING_PANEL)).toEqual({
+			aiDetectionPercent: null,
+			plagiarismPercent: null,
+			checking: true,
 		});
 	});
 
-	describe("score extraction", () => {
-		it("returns extracted scores with all fields", async () => {
-			mockStagehandExtract.mockResolvedValue({
-				aiDetectionPercent: 25,
-				plagiarismPercent: 8,
-				overallScore: 90,
-				notes: "All scores visible",
-			});
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(
-				stagehand as unknown as Stagehand,
-				"Test"
-			);
-
-			expect(result).toMatchObject({
-				aiDetectionPercent: 25,
-				plagiarismPercent: 8,
-				overallScore: 90,
-				notes: "All scores visible",
-			});
-		});
-
-		it("handles null scores when features unavailable", async () => {
-			mockStagehandExtract.mockResolvedValue({
-				aiDetectionPercent: null,
-				plagiarismPercent: null,
-				notes: "Premium features not available",
-			});
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(
-				stagehand as unknown as Stagehand,
-				"Test"
-			);
-
-			expect(result.aiDetectionPercent).toBeNull();
-			expect(result.plagiarismPercent).toBeNull();
-			expect(result.notes).toContain("Premium");
-		});
-
-		it("calls extract with correct schema instruction", async () => {
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(mockStagehandExtract).toHaveBeenCalledWith(
-				expect.stringContaining("AI Detection Percentage"),
-				expect.anything() // GrammarlyExtractSchema
-			);
-		});
-
-		it("tells the extractor never to estimate a score", async () => {
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			const scoreCall = mockStagehandExtract.mock.calls.find(([instruction]) =>
-				String(instruction).includes("AI Detection Percentage")
-			);
-			expect(scoreCall?.[0]).toContain("Never estimate");
-			expect(scoreCall?.[0]).not.toContain("estimate based");
-		});
+	it("reads the all-clear message as zero for both", () => {
+		expect(parseScores(EMPTY_DOC_PANEL)).toMatchObject({ aiDetectionPercent: 0, plagiarismPercent: 0 });
 	});
 
-	describe("editor check", () => {
-		it("refuses to read scores when the editor does not hold the new text", async () => {
-			mockPageEvaluate.mockImplementation(async () => "The text of an older document.");
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await expect(
-				runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Brand new text")
-			).rejects.toThrow("does not contain the new text");
-			const scoreCalls = mockStagehandExtract.mock.calls.filter(([instruction]) =>
-				String(instruction).includes("AI Detection Percentage")
-			);
-			expect(scoreCalls).toHaveLength(0);
-		});
-
-		it("accepts editor text with different line breaks", async () => {
-			mockPageEvaluate.mockImplementation(async () => "First line\n\nsecond   line");
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(
-				stagehand as unknown as Stagehand,
-				"First line second line"
-			);
-			expect(result.aiDetectionPercent).toBe(15);
-		});
-
-		it("ignores zero-width characters in the editor", async () => {
-			mockPageEvaluate.mockImplementation(async () => "Zero\u200Bwidth\u2060 text\uFEFF here.");
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(
-				stagehand as unknown as Stagehand,
-				"Zerowidth text here."
-			);
-			expect(result.aiDetectionPercent).toBe(15);
-		});
-
-				it("accepts paragraphs joined with no space and typographic quotes", async () => {
-			// textContent of <p>One block.</p><p>It's next.</p>
-			mockPageEvaluate.mockImplementation(async () => "One block.It\u2019s next \u2014 really.");
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(
-				stagehand as unknown as Stagehand,
-				"One block.\n\nIt's next - really."
-			);
-			expect(result.aiDetectionPercent).toBe(15);
-		});
+	it("reads a plagiarism percentage", () => {
+		const panel = "12% of your text matches existing sources\n40% of your text has patterns that resemble AI text";
+		expect(parseScores(panel)).toMatchObject({ aiDetectionPercent: 40, plagiarismPercent: 12 });
 	});
 
-	describe("grammar suggestions", () => {
-		it("flows the default sidebar suggestions through", async () => {
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(result.grammarSuggestionCount).toBe(1);
-			expect(result.grammarSuggestions).toEqual([
-				{ category: "Correctness", original: "teh", suggestion: "the" },
-			]);
-		});
-
-		it("returns the suggestions read from the sidebar", async () => {
-			mockStagehandExtract
-				.mockResolvedValueOnce({
-					suggestionCount: 2,
-					suggestions: [
-						{ category: "Correctness", original: "teh", suggestion: "the" },
-						{ category: "Clarity", original: "in order to", suggestion: "to" },
-					],
-				})
-				.mockResolvedValueOnce({
-					aiDetectionPercent: 4,
-					plagiarismPercent: 0,
-					notes: "Scores visible",
-				});
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(result.grammarSuggestionCount).toBe(2);
-			expect(result.grammarSuggestions).toHaveLength(2);
-			expect(result.grammarSuggestions[0]?.category).toBe("Correctness");
-			expect(result.aiDetectionPercent).toBe(4);
-		});
-
-		it("still returns scores when the suggestions cannot be read", async () => {
-			mockStagehandExtract
-				.mockRejectedValueOnce(new Error("Sidebar not found"))
-				.mockResolvedValueOnce({
-					aiDetectionPercent: 7,
-					plagiarismPercent: 1,
-					notes: "Scores visible",
-				});
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			const result = await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test");
-
-			expect(result.grammarSuggestionCount).toBeNull();
-			expect(result.grammarSuggestions).toEqual([]);
-			expect(result.aiDetectionPercent).toBe(7);
-		});
-	});
-
-	describe("error handling", () => {
-		it("throws when score extraction fails, with no partial extraction", async () => {
-			mockStagehandExtract
-				.mockResolvedValueOnce({ suggestionCount: 0, suggestions: [] })
-				.mockRejectedValueOnce(new Error("Primary extraction failed"))
-				.mockResolvedValueOnce({
-					aiDetectionPercent: 10,
-					plagiarismPercent: 2,
-					notes: "A stale score from an earlier document",
-				});
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await expect(
-				runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test")
-			).rejects.toThrow("Primary extraction failed");
-			expect(mockStagehandExtract).toHaveBeenCalledTimes(2);
-		});
-	});
-
-	describe("options handling", () => {
-		it("logs iteration number when provided", async () => {
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test", {
-				iteration: 3,
-			});
-
-			// Verify the function completed successfully with options
-			expect(mockStagehandExtract).toHaveBeenCalled();
-		});
-
-		it("logs mode when provided", async () => {
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(stagehand as unknown as Stagehand, "Test", {
-				mode: "analyze",
-			});
-
-			expect(mockStagehandExtract).toHaveBeenCalled();
-		});
-
-		it("handles undefined options", async () => {
-			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
-
-			await runStagehandGrammarlyTask(
-				stagehand as unknown as Stagehand,
-				"Test",
-				undefined
-			);
-
-			expect(mockStagehandExtract).toHaveBeenCalled();
+	it("never turns unrelated text into a score", () => {
+		expect(parseScores("Grammarly Assistant\nAll the world's a page.")).toMatchObject({
+			aiDetectionPercent: null,
+			plagiarismPercent: null,
 		});
 	});
 });
 
-describe("cleanupGrammarlyDocument", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
+describe("runStagehandGrammarlyTask", () => {
+	it("throws when no page is available", async () => {
+		const stagehand = { context: { pages: () => [] } } as unknown as Stagehand;
+		await expect(runStagehandGrammarlyTask(stagehand, "Text")).rejects.toThrow("No page available");
 	});
 
-	it("calls act to delete or close the document", async () => {
-		mockStagehandAct.mockResolvedValue(undefined);
-		const stagehand = createMockStagehand([createMockPage()]);
+	it("navigates to Grammarly when not already there", async () => {
+		await runStagehandGrammarlyTask(createStagehand("https://other.test"), ARTICLE);
+		expect(mockGoto).toHaveBeenCalledWith("https://app.grammarly.com", expect.anything());
+	});
 
-		await cleanupGrammarlyDocument(stagehand as unknown as Stagehand);
+	it("skips navigation when already on Grammarly", async () => {
+		await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+		expect(mockGoto).not.toHaveBeenCalled();
+	});
 
-		expect(mockStagehandAct).toHaveBeenCalledWith(
-			expect.stringContaining("Delete the current document")
+	it("pastes the full text into the editor with a paste event", async () => {
+		const longText = "word ".repeat(4000);
+		await runStagehandGrammarlyTask(createStagehand(), longText);
+		const pasteCall = mockEvaluate.mock.calls.find(([, arg]) => arg && typeof arg === "object" && "value" in arg);
+		expect((pasteCall?.[1] as { value: string; selector: string }).value).toBe(longText);
+		expect((pasteCall?.[1] as { selector: string }).selector).toBe('.ql-editor[contenteditable="true"]');
+	});
+
+	it("returns the scores and suggestions from the real panels", async () => {
+		const result = await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		expect(result.aiDetectionPercent).toBe(37);
+		expect(result.plagiarismPercent).toBe(0);
+		expect(result.grammarSuggestionCount).toBe(16);
+		expect(result.grammarSuggestions[0]?.category).toBe("Correctness");
+		expect(result.notes).toContain("read from the Grammarly panel text");
+		expect(result.notes).toContain(`${countWords(ARTICLE)} words`);
+	});
+
+	it("does not use the LLM reader when the panel text gives both scores", async () => {
+		await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+		const scoreReads = mockExtract.mock.calls.filter(([instruction]) => !String(instruction).includes("suggestions sidebar"));
+		expect(scoreReads).toHaveLength(0);
+	});
+
+	it("refuses to read scores when Grammarly ignores the paste", async () => {
+		fake.pasteRegisters = false;
+
+		await expect(runStagehandGrammarlyTask(createStagehand(), ARTICLE)).rejects.toThrow(
+			/registered 0 words/
+		);
+		expect(fake.aiTabOpen).toBe(false);
+	});
+
+	it("refuses to read scores when the word count is far from the text", async () => {
+		fake.wordCountOverride = 12;
+
+		await expect(runStagehandGrammarlyTask(createStagehand(), ARTICLE)).rejects.toThrow(
+			/registered 12 words/
 		);
 	});
 
-	it("does not throw when cleanup fails", async () => {
-		mockStagehandAct.mockRejectedValue(new Error("Cleanup failed"));
-		const stagehand = createMockStagehand([createMockPage()]);
-
-		// Should not throw
-		await expect(
-			cleanupGrammarlyDocument(stagehand as unknown as Stagehand)
-		).resolves.not.toThrow();
+	it("ignores a number followed by 'words' inside the document", async () => {
+		const text = `Write 300 words a day. ${ARTICLE}`;
+		const result = await runStagehandGrammarlyTask(createStagehand(), text);
+		expect(result.notes).toContain(`${countWords(text)} words`);
 	});
 
-	it("completes silently on error", async () => {
-		mockStagehandAct.mockRejectedValue(new Error("Cleanup failed"));
-		const stagehand = createMockStagehand([createMockPage()]);
+	it("fails when the editor never appears empty", async () => {
+		fake.editorText = "An old document that is still open.";
 
-		const result = await cleanupGrammarlyDocument(stagehand as unknown as Stagehand);
+		await expect(runStagehandGrammarlyTask(createStagehand(), ARTICLE)).rejects.toThrow(
+			"Could not find an empty Grammarly editor"
+		);
+	});
 
-		// Returns undefined (void function)
-		expect(result).toBeUndefined();
+	it("returns null scores when Grammarly is still checking at the end of the wait", async () => {
+		fake.checkingPollsBeforeResult = 10_000;
+
+		const result = await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		expect(result.aiDetectionPercent).toBeNull();
+		expect(result.plagiarismPercent).toBeNull();
+		expect(result.notes).toContain("still checking");
+	});
+
+	it("uses the LLM reader only for a score the panel text does not give", async () => {
+		fake.resultPanel = "Plagiarism and AI text check\nWe didn’t detect plagiarism\nA reworded AI sentence";
+
+		const result = await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		expect(result.plagiarismPercent).toBe(0); // from the panel text, not the reader's 99
+		expect(result.aiDetectionPercent).toBe(99); // from the LLM reader
+		expect(result.notes).toContain("LLM reader used");
+	});
+
+	it("still returns scores when the suggestions cannot be read", async () => {
+		mockExtract.mockImplementation(async () => {
+			throw new Error("Sidebar not found");
+		});
+
+		const result = await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		expect(result.aiDetectionPercent).toBe(37);
+		expect(result.grammarSuggestionCount).toBe(16); // from the panel header
+		expect(result.grammarSuggestions).toEqual([]);
+	});
+
+	it("uses a direct action when observe finds nothing", async () => {
+		mockObserve.mockResolvedValue([]);
+
+		await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		const labels = mockAct.mock.calls.map(([action]) => String(action));
+		expect(labels.some((label) => label.includes("create a new document"))).toBe(true);
+		expect(labels.some((label) => label.includes("Check for AI text & plagiarism"))).toBe(true);
+	});
+});
+
+describe("cleanupGrammarlyDocument", () => {
+	it("calls act to delete or close the document", async () => {
+		await cleanupGrammarlyDocument(createStagehand());
+		expect(mockAct).toHaveBeenCalledWith(expect.stringContaining("Delete the current document"));
+	});
+
+	it("does not throw when cleanup fails", async () => {
+		mockAct.mockRejectedValue(new Error("Cleanup failed"));
+		await expect(cleanupGrammarlyDocument(createStagehand())).resolves.toBeUndefined();
 	});
 });
