@@ -19,6 +19,7 @@ export class BrowserbaseSessionManager {
   private cachedSessionId: string | null = null;
   private cachedContextId: string | null = null;
   private readonly advancedStealth: boolean;
+  private readonly solveCaptchas: boolean;
 
   constructor(config: AppConfig) {
     if (!config.browserbaseApiKey || !config.browserbaseProjectId) {
@@ -30,6 +31,7 @@ export class BrowserbaseSessionManager {
     this.bb = new Browserbase({ apiKey: config.browserbaseApiKey });
     this.projectId = config.browserbaseProjectId;
     this.advancedStealth = config.browserbaseAdvancedStealth;
+    this.solveCaptchas = config.browserbaseSolveCaptchas;
 
     // Use provided session/context IDs if available
     this.cachedSessionId = config.browserbaseSessionId ?? null;
@@ -99,8 +101,8 @@ export class BrowserbaseSessionManager {
       browserSettings: {
         // Advanced stealth is a Browserbase Scale plan feature, so it is opt-in
         advancedStealth: this.advancedStealth,
-        // Auto-solve CAPTCHAs
-        solveCaptchas: true,
+        // CAPTCHA solving is not on every Browserbase plan, so it is opt-in
+        solveCaptchas: this.solveCaptchas,
         // Block ads for faster loading
         blockAds: true,
       },

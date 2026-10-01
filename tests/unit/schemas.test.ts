@@ -83,7 +83,7 @@ describe("ToolInputSchema", () => {
 	describe("default values", () => {
 		it("applies defaults when not provided", () => {
 			const result = ToolInputSchema.parse({ text: "sample" });
-			expect(result.mode).toBe("optimize");
+			expect(result.mode).toBe("score_only");
 			expect(result.max_ai_percent).toBe(10);
 			expect(result.max_plagiarism_percent).toBe(5);
 			expect(result.max_iterations).toBe(5);

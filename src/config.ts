@@ -65,6 +65,7 @@ export interface AppConfig {
   browserbaseSessionId: string | undefined;
   browserbaseContextId: string | undefined;
   browserbaseAdvancedStealth: boolean;
+  browserbaseSolveCaptchas: boolean;
   stagehandModel: string | undefined;
   stagehandCacheDir: string | undefined;
 
@@ -122,6 +123,9 @@ const EnvSchema = z.object({
   BROWSERBASE_SESSION_ID: z.string().optional(),
   BROWSERBASE_CONTEXT_ID: z.string().optional(),
   BROWSERBASE_ADVANCED_STEALTH: z
+    .preprocess((val) => val === "true" || val === true, z.boolean())
+    .default(false),
+  BROWSERBASE_SOLVE_CAPTCHAS: z
     .preprocess((val) => val === "true" || val === true, z.boolean())
     .default(false),
   STAGEHAND_MODEL: z.string().default("gemini-2.5-flash"),
@@ -245,6 +249,7 @@ export const config: AppConfig = {
   browserbaseSessionId: env.BROWSERBASE_SESSION_ID,
   browserbaseContextId: env.BROWSERBASE_CONTEXT_ID,
   browserbaseAdvancedStealth: env.BROWSERBASE_ADVANCED_STEALTH,
+  browserbaseSolveCaptchas: env.BROWSERBASE_SOLVE_CAPTCHAS,
   stagehandModel: env.STAGEHAND_MODEL,
   stagehandCacheDir: env.STAGEHAND_CACHE_DIR,
 

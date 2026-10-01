@@ -28,9 +28,17 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Collapses whitespace, so line breaks in the editor do not break the comparison. */
+/**
+ * Reduces text to a comparable form. The editor can join paragraphs with no
+ * space and can use typographic quotes and dashes, so remove all whitespace
+ * and map those characters to plain ones.
+ */
 function normalize(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  return value
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\s+/g, "");
 }
 
 /**
@@ -118,11 +126,12 @@ export async function runStagehandGrammarlyTask(
     const expectedStart = normalize(text).slice(0, 60);
     const editorText = normalize(
       String(
-        (await page.evaluate(
-          () =>
-            document.querySelector('[contenteditable="true"]')?.textContent ??
-            "",
-        )) ?? "",
+        (await page.evaluate(() => {
+          const editor = document.querySelector<HTMLElement>(
+            '[contenteditable="true"]',
+          );
+          return editor?.innerText ?? editor?.textContent ?? "";
+        })) ?? "",
       ),
     );
     if (!editorText.includes(expectedStart)) {

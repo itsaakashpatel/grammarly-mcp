@@ -71,7 +71,7 @@ async function main(): Promise<void> {
     browserSettings: {
       context: { id: contextId, persist: true },
       advancedStealth: config.browserbaseAdvancedStealth,
-      solveCaptchas: true,
+      solveCaptchas: config.browserbaseSolveCaptchas,
     },
   });
 

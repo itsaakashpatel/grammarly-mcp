@@ -13,25 +13,12 @@ import {
   rewriteText,
   summarizeOptimization,
 } from "./llm/rewriteClient";
-import {
-  markdownToPlainText,
-  PLACEHOLDER_INSTRUCTIONS,
-  protectMarkdown,
-  restoreMarkdown,
-  splitFrontMatter,
-} from "./markdown";
 
 export const ToolInputSchema = z.object({
   text: z.string().min(1, "text is required"),
-  content_format: z
-    .enum(["plain", "markdown"])
-    .default("plain")
-    .describe(
-      "markdown: score the prose only, keep front matter, and lock headings, images, tables, code and link targets during rewrites.",
-    ),
   mode: z
     .enum(["score_only", "optimize", "analyze"])
-    .default("optimize")
+    .default("score_only")
     .describe(
       "score_only gets scores, analyze interprets them, optimize rewrites to meet thresholds.",
     ),
@@ -64,7 +51,7 @@ export const ToolInputSchema = z.object({
     .describe("Short description of the domain (e.g., 'university essay')."),
   custom_instructions: z
     .string()
-    .max(6000)
+    .max(2000)
     .optional()
     .describe(
       "Extra constraints (e.g., preserve citations, do not change code blocks).",
@@ -211,24 +198,6 @@ export function thresholdsMet(
 }
 
 /**
- * How far scores are above their thresholds, in percentage points. Zero means
- * both thresholds pass. A missing score counts as 100, the worst value.
- * @internal Exported for testing
- */
-export function scoreDistance(
-  scores: GrammarlyScores,
-  maxAiPercent: number,
-  maxPlagiarismPercent: number,
-): number {
-  const ai = scores.aiDetectionPercent ?? 100;
-  const plagiarism = scores.plagiarismPercent ?? 100;
-  return (
-    Math.max(0, ai - maxAiPercent) +
-    Math.max(0, plagiarism - maxPlagiarismPercent)
-  );
-}
-
-/**
  * Retry utility with exponential backoff.
  * @internal Exported for testing
  */
@@ -285,7 +254,6 @@ export async function runGrammarlyOptimization(
 ): Promise<GrammarlyOptimizeResult> {
   const {
     text,
-    content_format,
     mode,
     max_ai_percent,
     max_plagiarism_percent,
@@ -299,23 +267,7 @@ export async function runGrammarlyOptimization(
 
   const history: HistoryEntry[] = [];
 
-  // In markdown mode the rewriter works on a placeholder copy of the body,
-  // Grammarly scores the plain prose, and the front matter is never touched.
-  const isMarkdown = content_format === "markdown";
-  const { frontMatter, body } = isMarkdown
-    ? splitFrontMatter(text)
-    : { frontMatter: "", body: text };
-  const rewriteInstructions = isMarkdown
-    ? [custom_instructions, PLACEHOLDER_INSTRUCTIONS]
-        .filter(Boolean)
-        .join("\n\n")
-    : custom_instructions;
-  const toScoringText = (current: string): string =>
-    isMarkdown ? markdownToPlainText(current) : current;
-  const toFinalText = (current: string): string => `${frontMatter}${current}`;
-
-  // currentText is the body the caller will receive (markdown restored).
-  let currentText = body;
+  let currentText = text;
   let lastScores: GrammarlyScoreResult | null = null;
   let iterationsUsed = 0;
   let reachedThresholds = false;
@@ -373,7 +325,7 @@ export async function runGrammarlyOptimization(
     // Baseline scoring (iteration 0 before optimization loop) with retry
     lastScores = await withRetry(
       () =>
-        activeProvider.scoreText(activeSessionId, toScoringText(currentText), {
+        activeProvider.scoreText(activeSessionId, currentText, {
           maxSteps: max_steps,
           iteration: 0,
           mode,
@@ -403,7 +355,7 @@ export async function runGrammarlyOptimization(
         : "Score-only run: thresholds not met or scores unavailable; no rewriting performed.";
 
       return {
-        final_text: toFinalText(currentText),
+        final_text: currentText,
         ai_detection_percent: lastScores.aiDetectionPercent,
         plagiarism_percent: lastScores.plagiarismPercent,
         iterations_used: 0,
@@ -440,7 +392,7 @@ export async function runGrammarlyOptimization(
       await onProgress?.("Analysis complete", 100);
 
       return {
-        final_text: toFinalText(currentText),
+        final_text: currentText,
         ai_detection_percent: lastScores.aiDetectionPercent,
         plagiarism_percent: lastScores.plagiarismPercent,
         iterations_used: 0,
@@ -455,44 +407,6 @@ export async function runGrammarlyOptimization(
     }
 
     // Mode: optimize
-    // Both scores are needed to judge a rewrite. Without them the loop could
-    // only rewrite blindly, so stop before any rewrite.
-    if (
-      lastScores.aiDetectionPercent === null ||
-      lastScores.plagiarismPercent === null
-    ) {
-      const missing = [
-        lastScores.aiDetectionPercent === null ? "AI detection" : null,
-        lastScores.plagiarismPercent === null ? "plagiarism" : null,
-      ]
-        .filter(Boolean)
-        .join(" and ");
-      await onProgress?.("Optimization stopped: a score is unavailable", 100);
-      return {
-        final_text: toFinalText(currentText),
-        ai_detection_percent: lastScores.aiDetectionPercent,
-        plagiarism_percent: lastScores.plagiarismPercent,
-        iterations_used: 0,
-        thresholds_met: false,
-        history,
-        grammar_suggestion_count: lastScores.grammarSuggestionCount ?? null,
-        grammar_suggestions: lastScores.grammarSuggestions ?? [],
-        notes: `Optimization stopped before any rewrite: Grammarly showed no ${missing} score. Check the Grammarly plan and the page in the live view. Baseline notes: ${lastScores.notes ?? ""}`,
-        live_url: liveUrl,
-        provider: activeProvider.providerName,
-      };
-    }
-
-    // The best text so far is the start of every rewrite and the final result,
-    // so a rewrite that scores worse never replaces a better one.
-    let bestScores: GrammarlyScoreResult = lastScores;
-    // Text that already passes is returned as it is, with no rewrite.
-    reachedThresholds = thresholdsMet(
-      bestScores,
-      max_ai_percent,
-      max_plagiarism_percent,
-    );
-
     await onProgress?.("Starting optimization loop...", 15);
     log("info", "Starting optimization loop", {
       max_iterations,
@@ -500,11 +414,7 @@ export async function runGrammarlyOptimization(
       max_plagiarism_percent,
     });
 
-    for (
-      let iteration = 1;
-      iteration <= max_iterations && !reachedThresholds;
-      iteration += 1
-    ) {
+    for (let iteration = 1; iteration <= max_iterations; iteration += 1) {
       iterationsUsed = iteration;
 
       // Progress is iteration-based (not wall clock): 15–85% reserved for loop.
@@ -517,38 +427,19 @@ export async function runGrammarlyOptimization(
         iterationProgress,
       );
 
-      // Protect the latest accepted text, so every token maps to its own value.
-      const locked = isMarkdown ? protectMarkdown(currentText) : null;
       const rewriteResult = await rewriteText(appConfig, {
-        originalText: locked ? locked.text : currentText,
-        lastAiPercent: bestScores.aiDetectionPercent,
-        lastPlagiarismPercent: bestScores.plagiarismPercent,
+        originalText: currentText,
+        lastAiPercent: lastScores.aiDetectionPercent,
+        lastPlagiarismPercent: lastScores.plagiarismPercent,
         targetMaxAiPercent: max_ai_percent,
         targetMaxPlagiarismPercent: max_plagiarism_percent,
         tone,
         domainHint: domain_hint,
-        customInstructions: rewriteInstructions,
+        customInstructions: custom_instructions,
         maxIterations: max_iterations,
       });
 
-      let candidate = rewriteResult.rewrittenText;
-      if (locked) {
-        const restored = restoreMarkdown(candidate, locked);
-        if (restored.problems.length > 0) {
-          log("warn", "Rewrite rejected: protected markdown changed", {
-            iteration,
-            problems: restored.problems,
-          });
-          history.push({
-            iteration,
-            ai_detection_percent: null,
-            plagiarism_percent: null,
-            note: `Rewrite rejected before scoring, best text kept: protected markdown changed (${restored.problems.slice(0, 5).join("; ")}).`,
-          });
-          continue;
-        }
-        candidate = restored.text;
-      }
+      currentText = rewriteResult.rewrittenText;
 
       // Progress: Re-scoring for this iteration.
       const scoringProgress = Math.max(
@@ -561,9 +452,9 @@ export async function runGrammarlyOptimization(
       );
 
       // Re-score the new candidate with retry logic
-      const candidateScores = await withRetry(
+      lastScores = await withRetry(
         () =>
-          activeProvider.scoreText(activeSessionId, toScoringText(candidate), {
+          activeProvider.scoreText(activeSessionId, currentText, {
             maxSteps: max_steps,
             iteration,
             mode,
@@ -576,38 +467,23 @@ export async function runGrammarlyOptimization(
         },
       );
 
-      const improved =
-        scoreDistance(
-          candidateScores,
-          max_ai_percent,
-          max_plagiarism_percent,
-        ) <= scoreDistance(bestScores, max_ai_percent, max_plagiarism_percent);
-      if (improved) {
-        currentText = candidate;
-        bestScores = candidateScores;
-      }
-      lastScores = bestScores;
-
       reachedThresholds = thresholdsMet(
-        bestScores,
+        lastScores,
         max_ai_percent,
         max_plagiarism_percent,
       );
 
       history.push({
         iteration,
-        ai_detection_percent: candidateScores.aiDetectionPercent,
-        plagiarism_percent: candidateScores.plagiarismPercent,
-        note: improved
-          ? rewriteResult.reasoning
-          : `Discarded: scored worse than the best text so far. ${rewriteResult.reasoning}`,
+        ai_detection_percent: lastScores.aiDetectionPercent,
+        plagiarism_percent: lastScores.plagiarismPercent,
+        note: rewriteResult.reasoning,
       });
 
       log("info", "Optimization iteration completed", {
         iteration,
-        aiDetectionPercent: candidateScores.aiDetectionPercent,
-        plagiarismPercent: candidateScores.plagiarismPercent,
-        kept: improved,
+        aiDetectionPercent: lastScores.aiDetectionPercent,
+        plagiarismPercent: lastScores.plagiarismPercent,
         thresholdsMet: reachedThresholds,
       });
 
@@ -625,7 +501,7 @@ export async function runGrammarlyOptimization(
       iterationsUsed,
       thresholdsMet: reachedThresholds,
       history,
-      finalText: toFinalText(currentText),
+      finalText: currentText,
       maxAiPercent: max_ai_percent,
       maxPlagiarismPercent: max_plagiarism_percent,
     });
@@ -634,7 +510,7 @@ export async function runGrammarlyOptimization(
     await onProgress?.("Optimization complete", 100);
 
     return {
-      final_text: toFinalText(currentText),
+      final_text: currentText,
       ai_detection_percent: lastScores.aiDetectionPercent,
       plagiarism_percent: lastScores.plagiarismPercent,
       iterations_used: iterationsUsed,

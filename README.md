@@ -1,17 +1,18 @@
 # Grammarly MCP Server
 
-> **Fork notes (`content-gate` branch).** This fork changes the upstream behavior:
+> **Fork notes (`content-gate` branch).** This fork is tuned for checking text, not rewriting it:
 >
-> - The full text is scored. The upstream 8,000-character cut is gone.
+> - `mode` defaults to `score_only`. Pass `optimize` or `analyze` to use the LLM rewrite features.
+> - The full text is scored. The upstream 8,000-character cut is gone. Send plain text: the tool
+>   pastes exactly what it receives.
 > - Scores are never estimated. A score that Grammarly does not show is `null`, and a `null`
 >   score fails the thresholds.
-> - A failed scoring pass throws and retries. It never reads a possibly stale score.
+> - The tool confirms that the editor holds the new text before it reads scores, and a failed
+>   scoring pass throws and retries. It never reads a possibly stale score.
 > - The output includes `grammar_suggestions` and `grammar_suggestion_count` from the
 >   Grammarly sidebar (best effort, Stagehand only).
-> - `content_format: "markdown"` scores the plain prose, keeps front matter, and locks headings,
->   images, tables, code, HTML and link targets. A rewrite that changes them is rejected.
-> - `CLAUDE_MODEL=auto` never picks Haiku.
-> - `BROWSERBASE_ADVANCED_STEALTH` (default `false`) controls the Scale plan stealth mode.
+> - `BROWSERBASE_ADVANCED_STEALTH` and `BROWSERBASE_SOLVE_CAPTCHAS` default to `false`, so the
+>   server works on the Browserbase free plan.
 > - `pnpm login:grammarly` saves a Grammarly login into a Browserbase context.
 > - `bin/start.sh` starts the server from the repository root, so a global MCP install finds `.env`.
 

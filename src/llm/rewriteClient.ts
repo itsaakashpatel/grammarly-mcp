@@ -77,8 +77,12 @@ export function chooseClaudeModel(
   if (textLength > 12000 || maxIterations > 8) {
     return "opus";
   }
-  // Sonnet: default for everything else. Auto mode never picks haiku, because
-  // the rewrite is user-facing copy; set CLAUDE_MODEL=haiku to force it.
+  // Haiku: cost optimization for short texts with few iterations.
+  // <3k characters is typically 1-2k tokens; ≤3 iterations is light rewrite work.
+  if (textLength < 3000 && maxIterations <= 3) {
+    return "haiku";
+  }
+  // Sonnet: default for moderate complexity.
   return "sonnet";
 }
 
