@@ -33,7 +33,7 @@ const POLL_MS = 1000;
 const EDITOR_WAIT_POLLS = 15;
 const WORD_COUNT_POLLS = 30;
 const SUGGESTION_POLLS = 20;
-const CHECK_POLLS = 150;
+const CHECK_POLLS = 90;
 
 /**
  * Sleep utility
@@ -57,10 +57,15 @@ function normalize(value: string): string {
     .replace(/\s+/g, "");
 }
 
-/** Counts words the way Grammarly does for plain prose: runs of non-space. */
+/**
+ * Counts words in prose. A word must contain a letter or a digit, so stray
+ * markup such as "-", "#" or "|" does not count, and words joined by a dash
+ * or a slash count separately.
+ */
 export function countWords(text: string): number {
-  const trimmed = text.trim();
-  return trimmed === "" ? 0 : trimmed.split(/\s+/).length;
+  return text
+    .split(/[\s\u2013\u2014/]+/)
+    .filter((token) => /[\p{L}\p{N}]/u.test(token)).length;
 }
 
 /** Reads the "N words" counter from the page text. */
@@ -80,6 +85,12 @@ export interface ParsedScores {
   plagiarismPercent: number | null;
   /** True while Grammarly still shows its progress message. */
   checking: boolean;
+  /**
+   * True when a score came only from the "No plagiarism or AI text detected"
+   * sentence. Grammarly shows that sentence for an empty document too, so
+   * it counts only after the check was seen running.
+   */
+  fromAllClear: boolean;
 }
 
 /**
@@ -113,15 +124,22 @@ export function parseScores(panelText: string): ParsedScores {
     plagiarism = 0;
   }
 
-  // "No plagiarism or AI text detected" covers both scores. It is only safe
-  // because the caller confirms the word count before it opens the panel:
-  // Grammarly shows the same sentence for an empty document.
+  // "No plagiarism or AI text detected" covers both scores. Grammarly shows
+  // the same sentence for an empty document, so the caller accepts it only
+  // after it saw the check running (see fromAllClear).
+  let fromAllClear = false;
   if (/No plagiarism or AI text detected/i.test(panelText)) {
+    fromAllClear = ai === null || plagiarism === null;
     ai ??= 0;
     plagiarism ??= 0;
   }
 
-  return { aiDetectionPercent: ai, plagiarismPercent: plagiarism, checking };
+  return {
+    aiDetectionPercent: ai,
+    plagiarismPercent: plagiarism,
+    checking,
+    fromAllClear,
+  };
 }
 
 /** Reads the page text, with the document text removed so it cannot be mistaken for a result. */
@@ -275,15 +293,18 @@ export async function runStagehandGrammarlyTask(
     });
 
     // Step 5: Read the writing suggestions. A failure here never blocks the scores.
+    // The count rises while Grammarly checks, so wait until two reads agree.
     let grammarSuggestionCount: number | null = null;
+    let previousCount: number | null = null;
     for (let poll = 0; poll < SUGGESTION_POLLS; poll += 1) {
-      grammarSuggestionCount = parseSuggestionCount(
-        (await readPanels(page)).panelText,
-      );
-      if (grammarSuggestionCount !== null) {
+      const count = parseSuggestionCount((await readPanels(page)).panelText);
+      if (count !== null && count === previousCount) {
+        grammarSuggestionCount = count;
         break;
       }
-      await sleep(POLL_MS);
+      previousCount = count;
+      grammarSuggestionCount = count;
+      await sleep(POLL_MS * 2);
     }
     let grammarSuggestions: GrammarlySuggestion[] = [];
     try {
@@ -318,33 +339,52 @@ export async function runStagehandGrammarlyTask(
     }
 
     // Step 7: Wait for the result, then read it from the panel text.
+    // A result counts only if it can only come from a real check: either the
+    // progress message was seen first, or the result carries a number.
     let scores: ParsedScores = {
       aiDetectionPercent: null,
       plagiarismPercent: null,
       checking: true,
+      fromAllClear: false,
     };
-    let panelText = "";
-    for (let poll = 0; poll < CHECK_POLLS; poll += 1) {
+    let sawChecking = false;
+    let accepted = false;
+    for (let poll = 0; poll < CHECK_POLLS && !accepted; poll += 1) {
       await sleep(POLL_MS);
-      panelText = (await readPanels(page)).panelText;
-      scores = parseScores(panelText);
-      if (
+      scores = parseScores((await readPanels(page)).panelText);
+      sawChecking ||= scores.checking;
+      accepted =
         !scores.checking &&
         scores.aiDetectionPercent !== null &&
-        scores.plagiarismPercent !== null
-      ) {
-        break;
-      }
+        scores.plagiarismPercent !== null &&
+        (sawChecking || !scores.fromAllClear);
     }
 
-    let notes = scores.checking
-      ? "Grammarly was still checking when the wait ended."
-      : "Scores read from the Grammarly panel text.";
+    let notes: string;
+    if (accepted) {
+      notes = "Scores read from the Grammarly panel text.";
+    } else if (scores.checking) {
+      notes = "Grammarly was still checking when the wait ended.";
+      scores = { ...scores, aiDetectionPercent: null, plagiarismPercent: null };
+    } else if (scores.fromAllClear && !sawChecking) {
+      notes =
+        "Grammarly showed its all-clear message without running a check, which it also shows for an empty document; scores not accepted.";
+      scores = {
+        ...scores,
+        aiDetectionPercent: null,
+        plagiarismPercent: null,
+        fromAllClear: false,
+      };
+    } else {
+      notes = "Scores read from the Grammarly panel text.";
+    }
 
     // Step 8: Fall back to the LLM reader only for a score the panel text did
     // not give, for example a result sentence that Grammarly has reworded.
     if (
+      !accepted &&
       !scores.checking &&
+      !notes.includes("all-clear") &&
       (scores.aiDetectionPercent === null || scores.plagiarismPercent === null)
     ) {
       const extractResult = await stagehand.extract(
@@ -364,6 +404,7 @@ export async function runStagehandGrammarlyTask(
         plagiarismPercent:
           scores.plagiarismPercent ?? extractResult.plagiarismPercent,
         checking: false,
+        fromAllClear: false,
       };
       notes = `Panel text was incomplete; LLM reader used. ${extractResult.notes}`;
     }

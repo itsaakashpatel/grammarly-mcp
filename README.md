@@ -5,6 +5,10 @@
 > - `mode` defaults to `score_only`. Pass `optimize` or `analyze` to use the LLM rewrite features.
 > - The full text is scored. The upstream 8,000-character cut is gone. Send plain text: the tool
 >   pastes exactly what it receives.
+> - The text goes into Grammarly's editor through a paste event. Scores are read only after
+>   Grammarly's word count matches the text, and the all-clear message counts only after the
+>   check was seen running, because Grammarly shows it for an empty document too. Send plain
+>   prose: raw markdown adds symbols that fail the word-count check.
 > - Scores are never estimated. A score that Grammarly does not show is `null`, and a `null`
 >   score fails the thresholds.
 > - The tool confirms that the editor holds the new text before it reads scores, and a failed

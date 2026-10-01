@@ -128,6 +128,12 @@ describe("parsers", () => {
 		expect(countWords("   ")).toBe(0);
 	});
 
+	it("ignores stray markup and splits words joined by dashes or slashes", () => {
+		expect(countWords("## Heading - with | a > quote")).toBe(4);
+		expect(countWords("calm\u2014steady and/or slow\u2013fast")).toBe(6);
+		expect(countWords("Step 1. and 2026")).toBe(4);
+	});
+
 	it("reads the word counter", () => {
 		expect(parseWordCount("Overall score\n684 words\n")).toBe(684);
 		expect(parseWordCount("Overall score\n1,204 words")).toBe(1204);
@@ -144,6 +150,7 @@ describe("parsers", () => {
 			aiDetectionPercent: 37,
 			plagiarismPercent: 0,
 			checking: false,
+			fromAllClear: false,
 		});
 	});
 
@@ -152,11 +159,16 @@ describe("parsers", () => {
 			aiDetectionPercent: null,
 			plagiarismPercent: null,
 			checking: true,
+			fromAllClear: false,
 		});
 	});
 
 	it("reads the all-clear message as zero for both", () => {
-		expect(parseScores(EMPTY_DOC_PANEL)).toMatchObject({ aiDetectionPercent: 0, plagiarismPercent: 0 });
+		expect(parseScores(EMPTY_DOC_PANEL)).toMatchObject({
+			aiDetectionPercent: 0,
+			plagiarismPercent: 0,
+			fromAllClear: true,
+		});
 	});
 
 	it("reads a plagiarism percentage", () => {
@@ -252,6 +264,38 @@ describe("runStagehandGrammarlyTask", () => {
 		expect(result.aiDetectionPercent).toBeNull();
 		expect(result.plagiarismPercent).toBeNull();
 		expect(result.notes).toContain("still checking");
+	});
+
+	it("accepts the all-clear message after the check was seen running", async () => {
+		fake.resultPanel = EMPTY_DOC_PANEL;
+
+		const result = await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		expect(result.aiDetectionPercent).toBe(0);
+		expect(result.plagiarismPercent).toBe(0);
+	});
+
+	it("rejects the all-clear message when no check was seen running", async () => {
+		fake.resultPanel = EMPTY_DOC_PANEL;
+		fake.checkingPollsBeforeResult = 0;
+
+		const result = await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		expect(result.aiDetectionPercent).toBeNull();
+		expect(result.plagiarismPercent).toBeNull();
+		expect(result.notes).toContain("all-clear");
+		// No LLM reader either: it could read the same empty-document message
+		const scoreReads = mockExtract.mock.calls.filter(([instruction]) => !String(instruction).includes("suggestions sidebar"));
+		expect(scoreReads).toHaveLength(0);
+	});
+
+	it("accepts a numeric result even when the progress message was missed", async () => {
+		fake.checkingPollsBeforeResult = 0;
+
+		const result = await runStagehandGrammarlyTask(createStagehand(), ARTICLE);
+
+		expect(result.aiDetectionPercent).toBe(37);
+		expect(result.plagiarismPercent).toBe(0);
 	});
 
 	it("uses the LLM reader only for a score the panel text does not give", async () => {

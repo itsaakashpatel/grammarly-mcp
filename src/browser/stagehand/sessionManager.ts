@@ -98,6 +98,9 @@ export class BrowserbaseSessionManager {
     // Build session create params
     const createParams: Parameters<typeof this.bb.sessions.create>[0] = {
       projectId: this.projectId,
+      // 15 minutes, the longest session on the Browserbase free plan. The
+      // project default can be 5 minutes, which a long document can exceed.
+      timeout: 900,
       browserSettings: {
         // Advanced stealth is a Browserbase Scale plan feature, so it is opt-in
         advancedStealth: this.advancedStealth,
