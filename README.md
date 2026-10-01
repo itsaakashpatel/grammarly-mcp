@@ -15,6 +15,9 @@
 >   server works on the Browserbase free plan.
 > - `pnpm login:grammarly` saves a Grammarly login into a Browserbase context.
 > - `bin/start.sh` starts the server from the repository root, so a global MCP install finds `.env`.
+> - The changes above apply to the Stagehand provider. The Browser Use provider still cuts text
+>   at 8,000 characters and replaces lines that look like prompt directives, so use Stagehand to
+>   score a full document unchanged.
 
 Single-tool Model Context Protocol (MCP) server for AI detection and plagiarism scoring via Grammarly's web interface. Supports two browser automation providers: **Stagehand + Browserbase** (default) and **Browser Use Cloud** (fallback).
 

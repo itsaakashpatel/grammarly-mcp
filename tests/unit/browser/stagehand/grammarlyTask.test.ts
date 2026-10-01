@@ -370,7 +370,18 @@ describe("runStagehandGrammarlyTask", () => {
 			expect(result.aiDetectionPercent).toBe(15);
 		});
 
-		it("accepts paragraphs joined with no space and typographic quotes", async () => {
+		it("ignores zero-width characters in the editor", async () => {
+			mockPageEvaluate.mockImplementation(async () => "Zero\u200Bwidth\u2060 text\uFEFF here.");
+			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
+
+			const result = await runStagehandGrammarlyTask(
+				stagehand as unknown as Stagehand,
+				"Zerowidth text here."
+			);
+			expect(result.aiDetectionPercent).toBe(15);
+		});
+
+				it("accepts paragraphs joined with no space and typographic quotes", async () => {
 			// textContent of <p>One block.</p><p>It's next.</p>
 			mockPageEvaluate.mockImplementation(async () => "One block.It\u2019s next \u2014 really.");
 			const stagehand = createMockStagehand([createMockPage("https://app.grammarly.com")]);
