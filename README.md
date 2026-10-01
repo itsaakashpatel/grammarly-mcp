@@ -9,6 +9,8 @@
 >   Grammarly's word count matches the text, and the all-clear message counts only after the
 >   check was seen running, because Grammarly shows it for an empty document too. Send plain
 >   prose: raw markdown adds symbols that fail the word-count check.
+> - The output includes `ai_flagged_passages` and `plagiarism_passages`, read from the spans that
+>   Grammarly marks in its editor, and `plagiarism_sources`, read from the match cards.
 > - Scores are never estimated. A score that Grammarly does not show is `null`, and a `null`
 >   score fails the thresholds.
 > - The tool confirms that the editor holds the new text before it reads scores, and a failed

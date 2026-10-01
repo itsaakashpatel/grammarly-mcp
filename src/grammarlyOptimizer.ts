@@ -126,6 +126,18 @@ export const ToolOutputSchema: ZodType<StructuredContent> = z.object({
     .describe(
       "Writing suggestions from the Grammarly sidebar for the final text.",
     ),
+  ai_flagged_passages: z
+    .array(z.string())
+    .optional()
+    .describe("Passages that Grammarly marks as resembling AI text."),
+  plagiarism_passages: z
+    .array(z.string())
+    .optional()
+    .describe("Passages that Grammarly matches to an external source."),
+  plagiarism_sources: z
+    .array(z.string())
+    .optional()
+    .describe("Sources named on Grammarly's match cards."),
   notes: z.string().describe("Summary or analysis notes from Claude."),
   live_url: z
     .string()
@@ -164,6 +176,9 @@ export interface GrammarlyOptimizeResult {
   history: HistoryEntry[];
   grammar_suggestion_count?: number | null;
   grammar_suggestions?: GrammarlyScoreResult["grammarSuggestions"];
+  ai_flagged_passages?: string[];
+  plagiarism_passages?: string[];
+  plagiarism_sources?: string[];
   notes: string;
   live_url: string | null;
   provider?: string;
@@ -363,6 +378,9 @@ export async function runGrammarlyOptimization(
         history,
         grammar_suggestion_count: lastScores.grammarSuggestionCount ?? null,
         grammar_suggestions: lastScores.grammarSuggestions ?? [],
+        ai_flagged_passages: lastScores.aiFlaggedPassages ?? [],
+        plagiarism_passages: lastScores.plagiarismPassages ?? [],
+        plagiarism_sources: lastScores.plagiarismSources ?? [],
         notes,
         live_url: liveUrl,
         provider: activeProvider.providerName,
@@ -400,6 +418,9 @@ export async function runGrammarlyOptimization(
         history,
         grammar_suggestion_count: lastScores.grammarSuggestionCount ?? null,
         grammar_suggestions: lastScores.grammarSuggestions ?? [],
+        ai_flagged_passages: lastScores.aiFlaggedPassages ?? [],
+        plagiarism_passages: lastScores.plagiarismPassages ?? [],
+        plagiarism_sources: lastScores.plagiarismSources ?? [],
         notes: analysis,
         live_url: liveUrl,
         provider: activeProvider.providerName,
@@ -518,6 +539,9 @@ export async function runGrammarlyOptimization(
       history,
       grammar_suggestion_count: lastScores.grammarSuggestionCount ?? null,
       grammar_suggestions: lastScores.grammarSuggestions ?? [],
+      ai_flagged_passages: lastScores.aiFlaggedPassages ?? [],
+      plagiarism_passages: lastScores.plagiarismPassages ?? [],
+      plagiarism_sources: lastScores.plagiarismSources ?? [],
       notes,
       live_url: liveUrl,
       provider: activeProvider.providerName,

@@ -18,6 +18,12 @@ export interface GrammarlyTaskResult {
   overallScore?: number | null;
   grammarSuggestionCount: number | null;
   grammarSuggestions: GrammarlySuggestion[];
+  /** Passages that Grammarly marks as resembling AI text, in document order. */
+  aiFlaggedPassages: string[];
+  /** Passages that Grammarly matches to an external source, in document order. */
+  plagiarismPassages: string[];
+  /** The sources named on the match cards, for example "Unveiling Masking | Northside Training". */
+  plagiarismSources: string[];
   notes: string;
 }
 
@@ -140,6 +146,111 @@ export function parseScores(panelText: string): ParsedScores {
     checking,
     fromAllClear,
   };
+}
+
+export interface FlaggedMark {
+  /** Grammarly's alert id, shared by every span of one flagged passage. */
+  id: string;
+  /** "h" for an AI passage, "hu" for a plagiarism match. */
+  flag: string;
+  text: string;
+  /** Index of the editor paragraph that holds the span. */
+  paragraph: number;
+}
+
+// A flagged span carries a class such as "mark_underline_1000331_24|hu%0".
+const MARK_CLASS = /mark_underline_(\d+)_\d+\|(hu?)%\d+/;
+
+/**
+ * Groups the marked spans into passages. Spans of one alert join in document
+ * order, with a space where the alert crosses a paragraph. An alert whose
+ * flag is "hu" is a plagiarism match; "h" is an AI passage.
+ */
+export function groupFlaggedMarks(marks: FlaggedMark[]): {
+  aiFlaggedPassages: string[];
+  plagiarismPassages: string[];
+} {
+  const order: string[] = [];
+  const byId = new Map<
+    string,
+    { flag: string; text: string; paragraph: number }
+  >();
+  for (const mark of marks) {
+    const existing = byId.get(mark.id);
+    if (!existing) {
+      order.push(mark.id);
+      byId.set(mark.id, {
+        flag: mark.flag,
+        text: mark.text,
+        paragraph: mark.paragraph,
+      });
+      continue;
+    }
+    const joiner = mark.paragraph === existing.paragraph ? "" : " ";
+    existing.text = `${existing.text}${joiner}${mark.text}`;
+    existing.paragraph = mark.paragraph;
+  }
+  const aiFlaggedPassages: string[] = [];
+  const plagiarismPassages: string[] = [];
+  for (const id of order) {
+    const passage = byId.get(id);
+    const text = passage?.text.replace(/\s+/g, " ").trim() ?? "";
+    if (!passage || text === "") {
+      continue;
+    }
+    (passage.flag === "hu" ? plagiarismPassages : aiFlaggedPassages).push(text);
+  }
+  return { aiFlaggedPassages, plagiarismPassages };
+}
+
+/** Reads the source names from the "This text matches · <source>" cards. */
+export function parsePlagiarismSources(panelText: string): string[] {
+  const sources: string[] = [];
+  for (const match of panelText.matchAll(/This text matches\s*·\s*(.+)/g)) {
+    const source = match[1]?.trim();
+    if (source && !sources.includes(source)) {
+      sources.push(source);
+    }
+  }
+  return sources;
+}
+
+/** Reads every flagged span in the editor. */
+async function readFlaggedMarks(page: StagehandPage): Promise<FlaggedMark[]> {
+  const raw = (await page.evaluate(
+    ({ selector, pattern }: { selector: string; pattern: string }) => {
+      const editor = document.querySelector(selector);
+      if (!editor) {
+        return [];
+      }
+      const markClass = new RegExp(pattern);
+      const paragraphs = Array.from(editor.children);
+      const marks: {
+        id: string;
+        flag: string;
+        text: string;
+        paragraph: number;
+      }[] = [];
+      for (const span of Array.from(
+        editor.querySelectorAll("span.alerts-plagiarism"),
+      )) {
+        const match = markClass.exec(span.className.toString());
+        if (!match?.[1] || !match[2]) {
+          continue;
+        }
+        const block = paragraphs.findIndex((p) => p.contains(span));
+        marks.push({
+          id: match[1],
+          flag: match[2],
+          text: (span as HTMLElement).innerText ?? span.textContent ?? "",
+          paragraph: block,
+        });
+      }
+      return marks;
+    },
+    { selector: EDITOR_SELECTOR, pattern: MARK_CLASS.source },
+  )) as FlaggedMark[] | null;
+  return Array.isArray(raw) ? raw : [];
 }
 
 /** Reads the page text, with the document text removed so it cannot be mistaken for a result. */
@@ -409,6 +520,24 @@ export async function runStagehandGrammarlyTask(
       notes = `Panel text was incomplete; LLM reader used. ${extractResult.notes}`;
     }
 
+    // Step 9: Read the flagged passages and the match sources. A failure here
+    // never blocks the scores.
+    let flagged = {
+      aiFlaggedPassages: [] as string[],
+      plagiarismPassages: [] as string[],
+    };
+    let plagiarismSources: string[] = [];
+    if (accepted || !scores.checking) {
+      try {
+        flagged = groupFlaggedMarks(await readFlaggedMarks(page));
+        plagiarismSources = parsePlagiarismSources(
+          (await readPanels(page)).panelText,
+        );
+      } catch (error) {
+        log("warn", "Could not read the flagged passages", { error });
+      }
+    }
+
     log("info", "Read Grammarly scores", {
       aiDetectionPercent: scores.aiDetectionPercent,
       plagiarismPercent: scores.plagiarismPercent,
@@ -421,6 +550,9 @@ export async function runStagehandGrammarlyTask(
       plagiarismPercent: scores.plagiarismPercent,
       grammarSuggestionCount,
       grammarSuggestions,
+      aiFlaggedPassages: flagged.aiFlaggedPassages,
+      plagiarismPassages: flagged.plagiarismPassages,
+      plagiarismSources,
       notes: `${notes} Grammarly counted ${registeredWords} words.`,
     };
   } catch (error) {

@@ -36,6 +36,9 @@ export interface GrammarlyScoreResult extends GrammarlyScores {
   /** Writing suggestions from the Grammarly sidebar (Stagehand provider only). */
   grammarSuggestionCount?: number | null;
   grammarSuggestions?: GrammarlySuggestion[];
+  aiFlaggedPassages?: string[];
+  plagiarismPassages?: string[];
+  plagiarismSources?: string[];
 }
 
 /**

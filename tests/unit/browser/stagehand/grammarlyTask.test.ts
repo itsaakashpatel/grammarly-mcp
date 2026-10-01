@@ -17,6 +17,8 @@ import type { Stagehand } from "@browserbasehq/stagehand";
 import {
 	cleanupGrammarlyDocument,
 	countWords,
+	groupFlaggedMarks,
+	parsePlagiarismSources,
 	parseScores,
 	parseSuggestionCount,
 	parseWordCount,
@@ -43,6 +45,7 @@ interface FakeGrammarly {
 	pasteRegisters: boolean;
 	resultPanel: string;
 	checkingPollsBeforeResult: number;
+	marks: { id: string; flag: string; text: string; paragraph: number }[];
 }
 
 let fake: FakeGrammarly;
@@ -59,6 +62,9 @@ function pageText(): string {
 }
 
 const mockEvaluate = vi.fn(async (_fn: unknown, arg?: unknown) => {
+	if (arg && typeof arg === "object" && "pattern" in arg) {
+		return fake.marks;
+	}
 	if (arg && typeof arg === "object" && "value" in arg) {
 		if (fake.pasteRegisters) {
 			fake.editorText = (arg as { value: string }).value;
@@ -99,6 +105,11 @@ beforeEach(() => {
 		pasteRegisters: true,
 		resultPanel: RESULT_PANEL,
 		checkingPollsBeforeResult: 2,
+		marks: [
+			{ id: "1000340", flag: "h", text: "Stuttering and Autism", paragraph: 0 },
+			{ id: "1000340", flag: "h", text: "Autistic adults experience disfluency.", paragraph: 1 },
+			{ id: "1000331", flag: "hu", text: "The National Institute on Deafness", paragraph: 2 },
+		],
 	};
 	mockGoto.mockResolvedValue(undefined);
 	mockObserve.mockImplementation(async (instruction: string) =>
@@ -184,6 +195,36 @@ describe("parsers", () => {
 	});
 });
 
+describe("flagged passages", () => {
+	it("groups spans by alert, and splits AI passages from plagiarism matches", () => {
+		const result = groupFlaggedMarks([
+			{ id: "1", flag: "h", text: "Title", paragraph: 0 },
+			{ id: "2", flag: "hu", text: "A matched ", paragraph: 1 },
+			{ id: "1", flag: "h", text: "first paragraph.", paragraph: 1 },
+			{ id: "2", flag: "hu", text: "sentence.", paragraph: 1 },
+			{ id: "3", flag: "h", text: "  ", paragraph: 2 },
+		]);
+		expect(result.aiFlaggedPassages).toEqual(["Title first paragraph."]);
+		expect(result.plagiarismPassages).toEqual(["A matched sentence."]);
+	});
+
+	it("reads the match sources from the real card text", () => {
+		const panel =
+			"This section resembles AI text\nOpen suggestion card\nThis text matches · NIDCD-supported Science at 2010 International Conference of Ear, Nose, Throat Researchers\nOpen suggestion card\nThis text matches · Unveiling Masking | Northside Training\nOpen suggestion card\n2% of your text matches external sources";
+		expect(parsePlagiarismSources(panel)).toEqual([
+			"NIDCD-supported Science at 2010 International Conference of Ear, Nose, Throat Researchers",
+			"Unveiling Masking | Northside Training",
+		]);
+	});
+
+	it("reads the real plagiarism sentence", () => {
+		expect(parseScores("2% of your text matches external sources\n76% of your text has patterns that resemble AI text")).toMatchObject({
+			aiDetectionPercent: 76,
+			plagiarismPercent: 2,
+		});
+	});
+});
+
 describe("runStagehandGrammarlyTask", () => {
 	it("throws when no page is available", async () => {
 		const stagehand = { context: { pages: () => [] } } as unknown as Stagehand;
@@ -216,6 +257,8 @@ describe("runStagehandGrammarlyTask", () => {
 		expect(result.grammarSuggestionCount).toBe(16);
 		expect(result.grammarSuggestions[0]?.category).toBe("Correctness");
 		expect(result.notes).toContain("read from the Grammarly panel text");
+		expect(result.aiFlaggedPassages).toEqual(["Stuttering and Autism Autistic adults experience disfluency."]);
+		expect(result.plagiarismPassages).toEqual(["The National Institute on Deafness"]);
 		expect(result.notes).toContain(`${countWords(ARTICLE)} words`);
 	});
 
